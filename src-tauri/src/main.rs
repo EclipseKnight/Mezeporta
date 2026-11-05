@@ -5303,7 +5303,9 @@ fn main() {
                 .manage(TauriState {
                     client: reqwest::ClientBuilder::new()
                         .gzip(true)
-                        .connect_timeout(Duration::from_secs(5))
+                        // Changed by Hunsterverse, 2026-11-05 (1.5.4-hv1): 15 s
+                        // connect (was 5 s); patch downloads set their own limits.
+                        .connect_timeout(Duration::from_secs(15))
                         .timeout(Duration::from_secs(10))
                         .build()
                         .unwrap_or_else(|e| {

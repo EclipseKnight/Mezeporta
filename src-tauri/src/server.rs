@@ -563,7 +563,9 @@ pub fn patcher_request(
         format!("{}/check", normalized)
     };
 
-    let mut request = client.get(check_url);
+    // Changed by Hunsterverse, 2026-11-05 (1.5.4-hv1): 60 s instead of 10 s,
+    // so a wait in the server's patch queue does not fail the login.
+    let mut request = client.get(check_url).timeout(patcher::PATCH_IDLE_TIMEOUT);
 
     if !client_etag.is_empty() {
         request = request.header("If-None-Match", client_etag);
@@ -603,7 +605,8 @@ pub fn native_patcher_request(
         format!("{}?key", manifest_url)
     };
 
-    let mut request = client.get(request_url);
+    // Changed by Hunsterverse, 2026-11-05 (1.5.4-hv1): 60 s instead of 10 s.
+    let mut request = client.get(request_url).timeout(patcher::PATCH_IDLE_TIMEOUT);
     if !client_etag.is_empty() {
         request = request.header("If-None-Match", client_etag);
     }

@@ -10,13 +10,20 @@ use std::{
     fs,
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
+    time::Duration,
 };
 use tauri::Window;
-use tokio::select;
+use tokio::{select, time::timeout};
 use tokio_util::sync::CancellationToken;
 
 pub const NETWORK_ERROR: &str = "patcher-network-error";
 pub const FILE_ERROR: &str = "patcher-file-error";
+// Changed by Hunsterverse, 2026-11-05 (1.5.4-hv1): patch requests fail when no
+// data arrives for this long (waiting for the response, or between two body
+// chunks), instead of the client's 10 s cap per file.
+pub const PATCH_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+// Overall cap for one patch file download.
+const PATCH_FILE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const ACTIVE_SERVER_FILE: &str = "Mezeporta/active_server";
 const CLIENT_ETAG_FILE: &str = "patch.etag";
 const SERVER_CACHE_DIR: &str = "Mezeporta/Servers";
@@ -358,10 +365,11 @@ async fn download_changed_paths(
     for changed_path in changed_paths {
         let req = client
             .get(format!("{}/{}", patcher_url, changed_path.source_path))
+            .timeout(PATCH_FILE_TIMEOUT)
             .send();
         let mut resp = select! {
             _ = cancel.cancelled() => return Ok(()),
-            resp = req => resp.or(Err(NETWORK_ERROR))?,
+            resp = timeout(PATCH_IDLE_TIMEOUT, req) => resp.or(Err(NETWORK_ERROR))?.or(Err(NETWORK_ERROR))?,
         };
         if !resp.status().is_success() {
             return Err(NETWORK_ERROR);
@@ -380,7 +388,7 @@ async fn download_changed_paths(
             .or(Err(FILE_ERROR))?;
         while let Some(chunk) = select! {
             _ = cancel.cancelled() => return Ok(()),
-            chunk = resp.chunk() => chunk.or(Err(NETWORK_ERROR))?
+            chunk = timeout(PATCH_IDLE_TIMEOUT, resp.chunk()) => chunk.or(Err(NETWORK_ERROR))?.or(Err(NETWORK_ERROR))?
         } {
             file.write_all(&chunk).or(Err(NETWORK_ERROR))?;
         }

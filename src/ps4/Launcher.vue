@@ -101,7 +101,7 @@ const mailOverlayRef = ref(null);
 const distributionOverlayRef = ref(null);
 const friendsOverlayRef = ref(null);
 const serverDialogNameDownNode = ref("server-dialog-host");
-const ps4VersionLabel = "release ver. 1.5.4";
+const ps4VersionLabel = "release ver. 1.5.4-hv1";
 const ps4LauncherTitle = computed(() => {
   const version = String(store.settings?.gameVersion ?? "").trim().toUpperCase();
   if (version === "S6" || version === "S7K" || version === "F4" || version === "F5") {

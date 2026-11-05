@@ -1874,7 +1874,7 @@ watch(
           <img draggable="false" :key="launcherHeaderUrl" :src="launcherHeaderUrl" @error="e => (e.target.src = fallbackLauncherHeader)"/>
           <div class="absolute">
             <div class="relative bottom-[45px] left-[350px] text-[#dcdcdc]">
-              release ver. 1.5.4
+              release ver. 1.5.4-hv1
             </div>
           </div>
           <div
