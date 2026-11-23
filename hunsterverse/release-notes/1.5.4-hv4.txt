@@ -1,2 +1,5 @@
 Switching between Stable and a pre-release no longer downloads the same patch files again: the launcher keeps the files it downloaded for each server and checks them before use.
 Settings, "Reset patched files" also deletes these saved patch files.
+Cancelling a patch now really stops it: nothing it downloaded is moved into the game folder, and the next login patches normally.
+Windows: going back to the launcher from the game starts a fresh launcher, so a patch at the next login no longer fails at once (until the launcher was closed).
+Linux: the launcher zip now keeps mezeporta-bin and run-mezeporta.sh executable when unzipped over an install.

@@ -21,6 +21,15 @@ SCENARIO:
            "proton run <meze-deps.exe> --stdin-b64" even when the setting says
            "portable"; with "proton" set and Dev Mode off, opening Settings
            keeps it and offers Proton
+  cancel   a cancelled patch (hv4 fix, the owner's steps): Stable installed;
+           choose the pre-release, Cancel the "Server Updates" dialog and
+           Start the game (stand-in Proton; the launcher closes); open the
+           launcher again, log in, Install, and Cancel while the last file
+           downloads (the fake server stalls it): nothing of that patch may
+           reach the game folder (older launchers moved the files downloaded
+           so far, a half file included, and recorded the patch as
+           installed); the next login offers the patch again and installs it
+           completely
   update   the update bar: a tampered download is refused, then the signed one
            is installed and the launcher restarts into it
 Prints "ok ..." per check; exits 1 at the first failure.
@@ -611,6 +620,146 @@ def scenario_proton(game, state):
         set_wine_mode(game, before)
 
 
+CANCEL_FILE = "dat/zz-cancel-test.pac"
+ORIGINALS = {"mhfo-hd.dll": "original mhfo-hd\n", os.path.join("dat", "a.pac"): "original a.pac\n"}
+
+
+def add_last_file(state):
+    """Adds CANCEL_FILE (1 MiB, made-up bytes, new to the patch cache) to the
+    "mods" slot, with content whose sha256 sorts after every other file of the
+    slot: the wrapper's /check is sorted by hash and the launcher downloads in
+    that order, so this file comes last, after the others are in tmp/."""
+    slot = os.path.join(state, "slots", "mods")
+    others = []
+    for dirpath, _d, names in os.walk(slot):
+        for n in names:
+            full = os.path.join(dirpath, n)
+            if os.path.relpath(full, slot) != os.path.normpath(CANCEL_FILE):
+                others.append(sha(full))
+    top = max(others)
+    for i in range(100000):
+        data = (b"cancel test %d\n" % i) * (1 << 16)
+        if hashlib.sha256(data).hexdigest() > top:
+            break
+    path = os.path.join(slot, CANCEL_FILE)
+    with open(path, "wb") as f:
+        f.write(data)
+    return path
+
+
+def originals_only(game, what):
+    """The game folder after a cancel: the original files (the run had already
+    put them back before downloading), nothing of the cancelled patch."""
+    for rel, text in ORIGINALS.items():
+        with open(os.path.join(game, rel)) as f:
+            got = f.read()
+        if got != text:
+            fail("%s: %s is %r, expected the original file (half-patched folder)" % (what, rel, got[:40]))
+    for rel in ("hvmods.dll", CANCEL_FILE):
+        if os.path.exists(os.path.join(game, rel)):
+            fail("%s: %s of the cancelled patch is in the game folder (size %d)"
+                 % (what, rel, os.path.getsize(os.path.join(game, rel))))
+    if os.path.exists(os.path.join(game, "tmp")):
+        fail("%s: tmp/ left in the game folder" % what)
+
+
+def start_game(s, state, what):
+    """Start (no patch dialog clicked); the stand-in Proton records the call and
+    exits at once, like a game that was closed; the launcher closes too."""
+    calls = os.path.join(state, "proton-calls.log")
+    before = os.path.getsize(calls) if os.path.exists(calls) else 0
+    s.wait(CLICK_TEXT.replace("e.textContent.trim().startsWith(text)", "true"), "the Start button (%s)" % what, 30,
+           "[data-controller-node='character-start']", "")
+    end = time.time() + 60
+    while time.time() < end:
+        if os.path.exists(calls):
+            with open(calls) as f:
+                f.seek(before)
+                if "END" in f.read():
+                    ok("%s: the game started (stand-in Proton called) and exited" % what)
+                    return
+        time.sleep(0.5)
+    fail("%s: the game was not started" % what)
+
+
+def scenario_cancel(game, state):
+    """The owner's report (2026-11-23): choose the pre-release, Cancel its
+    update, start the game anyway, close it back to the launcher; from then on
+    every update failed at once until the launcher was restarted (Windows: the
+    game ran inside the launcher's process; WebDriver cannot follow a window
+    reopened in the same process, so here the launcher closes with the game
+    and opens again). Then the update cancelled while it downloads, and the
+    login after that."""
+    exe = os.path.join(game, "mezeporta-bin")
+    stall, stalled = os.path.join(state, "stall"), os.path.join(state, "stalled")
+    # Start from Stable, as a player who never tried the pre-release (the
+    # account's choice set the way the website does).
+    with open(os.path.join(state, "channel"), "w") as f:
+        f.write("stable\n")
+    with open(os.path.join(state, "eligible"), "w") as f:
+        f.write("no\n")
+    add_last_file(state)
+    s = Session(exe)
+    try:
+        login(s)
+        end = time.time() + 90
+        while time.time() < end and not s.js("return !!document.querySelector('.hv-chip')"):
+            s.js(CLICK_TEXT, "button", "Install")  # Stable, if the folder holds something else
+            time.sleep(0.5)
+        chip(s, "Patch: Stable v1.30", "start of the cancel scenario")
+        files_are(game, os.path.join(state, "stable"), extra_absent=["hvmods.dll", CANCEL_FILE])
+        ok("game folder holds the stable patch")
+
+        # 1. Choose the pre-release; Cancel its update dialog and start the game anyway.
+        open_panel(s)
+        s.wait(CLICK_TEXT, "the mods choice", 10, ".hv-panel .hv-choices button", "Pre-release mods")
+        s.wait("return !!document.querySelector('.hv-confirm')", "the pre-release explanation", 20)
+        s.wait(CLICK_TEXT, "I understand", 10, ".hv-confirm button", "I understand")
+        s.wait(CLICK_TEXT, "the update dialog's Cancel", 60, "dialog button", "Cancel")
+        ok("pre-release chosen; the Server Updates dialog cancelled")
+        files_are(game, os.path.join(state, "stable"), extra_absent=["hvmods.dll", CANCEL_FILE])
+        ok("game folder still holds the stable patch: the game starts on a complete file set")
+        start_game(s, state, "after the cancelled update")
+    finally:
+        s.close()
+
+    # 2. The game closed, the launcher again. Log in: the update is offered;
+    # Install, and Cancel while its last file downloads (the fake server
+    # stalls it).
+    s = Session(exe)
+    try:
+        with open(stall, "w") as f:
+            f.write("/prerelease/mods/" + CANCEL_FILE + "\n")
+        if os.path.exists(stalled):
+            os.remove(stalled)
+        login(s)
+        install_patch_dialog(s, "back from the game")
+        end = time.time() + 60
+        while time.time() < end and not os.path.exists(stalled):
+            time.sleep(0.2)
+        if not os.path.exists(stalled):
+            fail("the download of %s never started" % CANCEL_FILE)
+        time.sleep(1)  # the first half is written to tmp/
+        s.wait(CLICK_TEXT, "the patcher's Cancel", 10, "button", "Cancel")
+        s.wait("return !!document.querySelector('#username_input') && "
+               "!!document.querySelector('#username_input').offsetWidth", "the login page after the cancel", 20)
+        ok("update cancelled during the last file's download; back on the login page")
+        time.sleep(4)  # a run that ignored the cancel would move files now
+        os.remove(stall)
+        originals_only(game, "after the cancel")
+        ok("after the cancel: no tmp/, nothing of the cancelled patch moved in; "
+           "the game folder holds the original game files")
+
+        # 3. Log in again: the update is offered again and installs completely.
+        login(s)
+        install_patch_dialog(s, "after the cancel")
+        chip(s, "Patch: Pre-release mods v1.31-pre2", "after the cancel")
+        files_are(game, os.path.join(state, "slots", "mods"))
+        ok("next login patched normally: the game folder holds the whole mods patch (%s included)" % CANCEL_FILE)
+    finally:
+        s.close()
+
+
 def set_style(game, style):
     """Sets the launcher style; returns the previous one (1, classic, if unset)."""
     path = os.path.join(game, "Mezeporta", "config.json")
@@ -704,7 +853,7 @@ def main():
     if scenario == "events":
         shots = os.path.abspath(sys.argv[4]) if len(sys.argv) > 4 else None
         return scenario_events(os.path.abspath(game), os.path.abspath(state), shots)
-    {"patch": scenario_patch, "proton": scenario_proton,
+    {"patch": scenario_patch, "proton": scenario_proton, "cancel": scenario_cancel,
      "update": scenario_update}[scenario](os.path.abspath(game), os.path.abspath(state))
 
 

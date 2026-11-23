@@ -20,6 +20,10 @@ fake_servers.py STATE_DIR GAME_PORT API_PORT RELEASE_PORT
   answers) serve STATE_DIR/events-current.json and festa.json; while
   STATE_DIR/events-down exists they answer 503.
 - RELEASE_PORT: static files from STATE_DIR/release (latest.json, binaries).
+- Stalled download (the cancel scenario): while STATE_DIR/stall exists and
+  holds a request path, that file is sent only half (the full Content-Length
+  announced), STATE_DIR/stalled is created, and the rest follows once
+  STATE_DIR/stall is gone (or after 120 s), so the test can cancel mid-file.
 
 Account: username "hunter", password "secret". The channel lives in
 STATE_DIR/channel (one line), so the test can read and set it. Every request
@@ -32,6 +36,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 STATE, GAME_PORT, API_PORT, RELEASE_PORT = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 USER, PASSWORD, TOKEN = "hunter", "secret", "test-token-1"
@@ -110,7 +115,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not full.startswith(os.path.realpath(folder) + os.sep) or not os.path.isfile(full):
             return self.answer(404, "not found", "text/plain")
         with open(full, "rb") as f:
-            self.answer(200, f.read(), "application/octet-stream")
+            data = f.read()
+        if read("stall") and read("stall") == self.path.split("?", 1)[0]:
+            return self.serve_stalled(data)
+        self.answer(200, data, "application/octet-stream")
+
+    def serve_stalled(self, data):
+        """Half the file, then wait while STATE_DIR/stall exists (see the module doc)."""
+        half = len(data) // 2
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data[:half])
+            self.wfile.flush()
+            with lock, open(path_of("requests.log"), "a") as log:
+                log.write("%d %s %s stalled\n" % (self.server.server_port, self.command, self.path))
+            open(path_of("stalled"), "w").close()
+            for _ in range(600):
+                if not os.path.exists(path_of("stall")):
+                    break
+                time.sleep(0.2)
+            self.wfile.write(data[half:])
+            self.wfile.flush()
+        except OSError:
+            # The launcher dropped the connection (the player cancelled).
+            self.close_connection = True
 
     def serve_check(self, folder):
         if not os.path.isdir(folder):

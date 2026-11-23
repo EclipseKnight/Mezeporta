@@ -20,6 +20,9 @@ use tokio_util::sync::CancellationToken;
 
 pub const NETWORK_ERROR: &str = "patcher-network-error";
 pub const FILE_ERROR: &str = "patcher-file-error";
+/// Hunsterverse (1.5.4-hv4): the player cancelled the run (internal, never
+/// shown: the frontend has already left the patcher page).
+const CANCELLED: &str = "patcher-cancelled";
 // Changed by Hunsterverse, 2026-11-05 (1.5.4-hv1): patch requests fail when no
 // data arrives for this long (waiting for the response, or between two body
 // chunks), instead of the client's 10 s cap per file.
@@ -410,8 +413,11 @@ async fn download_changed_paths(
             .get(format!("{}/{}", patcher_url, changed_path.source_path))
             .timeout(PATCH_FILE_TIMEOUT)
             .send();
+        // Changed by Hunsterverse (1.5.4-hv4): a cancel ends the run (Err), it
+        // no longer returns Ok, which went on to move the files downloaded so
+        // far (and a half-written one) into the game folder.
         let mut resp = select! {
-            _ = cancel.cancelled() => return Ok(()),
+            _ = cancel.cancelled() => return Err(CANCELLED),
             resp = timeout(PATCH_IDLE_TIMEOUT, req) => resp.or(Err(NETWORK_ERROR))?.or(Err(NETWORK_ERROR))?,
         };
         if !resp.status().is_success() {
@@ -430,7 +436,7 @@ async fn download_changed_paths(
             .open(&patcher_path)
             .or(Err(FILE_ERROR))?;
         while let Some(chunk) = select! {
-            _ = cancel.cancelled() => return Ok(()),
+            _ = cancel.cancelled() => return Err(CANCELLED),
             chunk = timeout(PATCH_IDLE_TIMEOUT, resp.chunk()) => chunk.or(Err(NETWORK_ERROR))?.or(Err(NETWORK_ERROR))?
         } {
             file.write_all(&chunk).or(Err(NETWORK_ERROR))?;
@@ -819,6 +825,11 @@ async fn patch_internal(
         cancel.clone(),
     )
     .await?;
+    // Hunsterverse (1.5.4-hv4): cancelled while checking or while files came
+    // from the patch cache: stop before anything moves into the game folder.
+    if cancel.is_cancelled() {
+        return Err(CANCELLED);
+    }
 
     // Patch files in place and persist the manifest.
     send_event(window, 0, 0, State::Patching, 0);
@@ -845,6 +856,11 @@ async fn patch_internal(
     Ok(())
 }
 
+/// Hunsterverse (1.5.4-hv4): one patch run at a time. A cancelled run may still
+/// be finishing a file operation when the player starts the next one; the next
+/// run waits for it instead of sharing `tmp/` and the game folder with it.
+static PATCH_RUN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Main patch entrypoint for the hash-based patch flow.
 pub async fn patch(
     window: Window,
@@ -854,6 +870,11 @@ pub async fn patch(
     game_folder: PathBuf,
     cancel: CancellationToken,
 ) {
+    let _run = PATCH_RUN.lock().await;
+    if cancel.is_cancelled() {
+        info!("patch cancelled before it started");
+        return;
+    }
     let active_file = game_folder.join(ACTIVE_SERVER_FILE);
     let target_server = patcher_resp.server_name.clone();
     let target_etag = patcher_resp.etag.trim().to_string();
@@ -954,7 +975,15 @@ pub async fn patch(
     )
     .await
     {
-        send_error(&window, e);
+        // Hunsterverse (1.5.4-hv4): a cancel is not an error for the player
+        // (the frontend already left the patcher page; a late error event
+        // would also cancel the run the player starts next). Nothing was moved:
+        // the game folder holds the files from before this run's downloads.
+        if e == CANCELLED {
+            info!("patch cancelled; nothing was moved into the game folder");
+        } else {
+            send_error(&window, e);
+        }
         if let Err(cleanup_err) = fs::remove_dir_all(&tmp_folder) {
             warn!("error deleting patcher dir: {}", cleanup_err);
         }

@@ -10,7 +10,7 @@ this folder, `src-tauri/src/hv_*.rs` and `src/components/HunsterversePanel.vue`.
 | 1.5.4-hv1 (2026-11-05) | Patch downloads fail after 60 s without data instead of 10 s per file (`patcher.rs`, `server.rs`, `main.rs`) |
 | 1.5.4-hv2 (2026-11-23) | Client patch choice, launcher self-update, safer patching (below) |
 | 1.5.4-hv3 (2026-11-23) | The Patch button moved off the CAPCOM logo (classic: in the footer after "Online Players"; PS4 style: right of Settings), part of the launcher layout so it scales with the window; the header's "release ver." comes from `tauri.conf.json` (hv2 still said hv1); event badges from the website's event list (below); Proton on the Steam Deck (below) |
-| 1.5.4-hv4 (2026-11-23) | Downloaded patch files are kept per server (patch cache, below): switching Stable <-> pre-release takes them from there instead of downloading again |
+| 1.5.4-hv4 (2026-11-23) | Downloaded patch files are kept per server (patch cache, below): switching Stable <-> pre-release takes them from there instead of downloading again. Cancelling a patch stops it (nothing moves into the game folder); on Windows the return from the game to the launcher starts a fresh launcher process (below); `Mezeporta-Linux.zip` stores `mezeporta-bin` and the `*.sh` files as executable (below) |
 
 ## Client patch choice (hv2)
 
@@ -72,6 +72,41 @@ ETag, version once known).
 - Unchanged: downloads go to `<game>/tmp/` first and nothing moves until all
   of them arrived; a failed download leaves the folder with the original
   files and the next login tries again.
+
+### Cancel (hv4 fix)
+
+Up to hv4 as first built, Cancel on the patcher page only ended the download
+loop early: the run then went on as if every file had arrived, moved what was
+in `tmp/` (a half-written file included) into the game folder and, when the
+cancelled file was the last one, recorded the patch as installed (the next
+login offered nothing, with a broken file in place). Now a cancel ends the
+run before anything moves (also when it comes while checking, or while the
+files come from the patch cache), `tmp/` is deleted and no error is shown;
+the next login offers the patch again. One run at a time: a new run waits
+until a cancelled one has finished. After a cancel the game folder holds the
+original game files (the run puts back what the previous patch replaced
+before it downloads), with no patch recorded for the server; Cancel in the
+"Server Updates" dialog itself changes nothing (the previous patch stays).
+
+Windows: the game runs inside the launcher's process (`meze-butter` loads
+`mhfo-hd.dll` there). When the game goes back to the launcher (exit code
+102), upstream reopened the window in the same process, where the DLLs the
+game loaded and files it kept open stay until the process ends; a patch at
+the next login (pending because its dialog was cancelled before playing)
+then could not replace them and failed at once, every login, until the
+launcher was closed. Now that return starts a fresh launcher process (as the
+self-update restarts, `hv_update::restart`), and only if that fails reopens
+in the same process.
+
+## Linux zip file modes (hv4, `pack_launcher_zip.py`)
+
+Upstream's `Mezeporta-Linux.zip` is made on Windows and stores no Unix file
+modes, so unzipping it over an install (the Play page's "Updating the
+launcher" for launchers older than hv2) recreated `run-mezeporta.sh`, which
+every start script runs, without its execute bit: the launcher did not open
+(the Play page only said to `chmod +x mezeporta-bin`). Our Linux zip now
+stores `mezeporta-bin` and every `*.sh` with mode 755; `build-release.sh`
+stops if the zip lacks them. The installers set the modes themselves.
 
 ## Patch cache (hv4, `hv_patch_cache.rs`)
 
@@ -278,6 +313,13 @@ launcher updates; launchers already updated stay on it until a newer release.
   API is down; Steam Deck: with no Wine and a stand-in Proton, Start runs
   `proton run meze-deps.exe --stdin-b64` (setting `portable` or `proton`),
   and `proton` stays set with Dev Mode off; a tampered update refused, the signed one installed and
-  restarted in place.
+  restarted in place; a cancelled patch (hv4 fix, the owner's steps): the
+  pre-release chosen, its update dialog cancelled and the game started on the
+  stable files; at the next launcher start the update cancelled while its
+  last file downloads (the stand-in stalls it) leaves no file of it in the
+  game folder, and the next login installs it completely. (WebDriver cannot
+  follow a window the launcher reopens in the same process, so the game's
+  "back to the launcher" is not driven; there the launcher closes and opens
+  again.)
 - `node --test hunsterverse/tests/*.test.mjs`: the event badge rules
   (`src/hvEvents.js`).

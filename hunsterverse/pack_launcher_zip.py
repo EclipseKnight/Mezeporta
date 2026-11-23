@@ -8,6 +8,12 @@ and attributes, except BINARY_NAME, whose content becomes NEW_BINARY (same
 name and attributes, deflated). Adds README (with {version} filled in)
 followed by LICENSE (the GPL text), CRLF, as Mezeporta-hv-README.txt. Same
 inputs give the same bytes (fixed dates).
+
+Linux zip (a BINARY_NAME without extension, mezeporta-bin): that binary and
+every *.sh get Unix mode 755 (1.5.4-hv4). Upstream's zip is made on Windows
+and stores no Unix modes, so unzipping it over an install (the Play page's
+"Updating the launcher") left run-mezeporta.sh, which the start scripts run,
+not executable: the launcher did not open.
 """
 import sys
 import zipfile
@@ -17,9 +23,17 @@ README_NAME = "Mezeporta-hv-README.txt"
 OLD_README_NAMES = {"Mezeporta-hv1-README.txt"}
 
 
+def executable(info):
+    """info as a Unix file with mode 755 (the DOS attribute bits kept)."""
+    info.create_system = 3
+    info.external_attr = (0o100755 << 16) | (info.external_attr & 0xFFFF)
+    return info
+
+
 def main():
     upstream, binary_name, new_binary, readme, licence, version, out = sys.argv[1:8]
     replaced = False
+    unix = "." not in binary_name
     with zipfile.ZipFile(upstream) as src, zipfile.ZipFile(out, "w") as dst:
         for info in src.infolist():
             if info.filename == README_NAME or info.filename in OLD_README_NAMES:
@@ -29,11 +43,16 @@ def main():
                 new.external_attr = info.external_attr
                 new.create_system = info.create_system
                 new.compress_type = zipfile.ZIP_DEFLATED
+                if unix:
+                    executable(new)
                 with open(new_binary, "rb") as f:
                     dst.writestr(new, f.read(), compresslevel=9)
                 replaced = True
             else:
-                dst.writestr(info, src.read(info.filename))
+                data = src.read(info.filename)
+                if unix and info.filename.endswith(".sh"):
+                    executable(info)
+                dst.writestr(info, data)
         if not replaced:
             sys.exit(f"{binary_name} not in {upstream}")
         with open(readme, encoding="utf-8") as f:

@@ -111,6 +111,14 @@ if [[ "${HV_SKIP_WINDOWS:-}" != 1 ]]; then
     "$HERE/Mezeporta-hv-README.txt" "$REPO/LICENSE" "$VERSION" "$WORK/out/Mezeporta-Windows.zip"
   python3 -I "$HERE/pack_launcher_zip.py" "$WORK/upstream/Mezeporta-Linux.zip" mezeporta-bin "$WORK/out/mezeporta-bin" \
     "$HERE/Mezeporta-hv-README.txt" "$REPO/LICENSE" "$VERSION" "$WORK/out/Mezeporta-Linux.zip"
+  # Unzipped over an install, these two must come out executable (hv4).
+  python3 -I - "$WORK/out/Mezeporta-Linux.zip" <<'EOF' || exit 1
+import sys, zipfile
+z = zipfile.ZipFile(sys.argv[1])
+bad = [n for n in ("mezeporta-bin", "run-mezeporta.sh") if z.getinfo(n).external_attr >> 16 & 0o111 != 0o111]
+if bad:
+    sys.exit("Mezeporta-Linux.zip: not executable when unzipped: %s" % ", ".join(bad))
+EOF
 fi
 
 echo "== 6. source zip"

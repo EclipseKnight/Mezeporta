@@ -5933,6 +5933,23 @@ fn main() {
                     info!("exited with code {}", code);
                     if code == RETURN_TO_LAUNCHER_EXIT_CODE {
                         info!("game requested return to launcher");
+                        // Hunsterverse (1.5.4-hv4): on Windows the game ran
+                        // inside this process (meze-butter loads mhfo-hd.dll
+                        // here), and what it leaves behind (DLLs it loaded,
+                        // files it kept open) stays until the process ends: a
+                        // patch at the next login could not replace those
+                        // files and failed at once, until the launcher was
+                        // closed. Come back as a fresh process instead (as the
+                        // self-update restarts: the new one waits for this one
+                        // to exit). Only if that fails, reopen in this process
+                        // as before.
+                        if cfg!(windows) {
+                            if let Some(exe) = launcher_exe() {
+                                if let Err(e) = hv_update::restart(exe) {
+                                    warn!("{e}; reopening the launcher in this process");
+                                }
+                            }
+                        }
                         continue;
                     }
                     info!("launcher exiting after game exit");
