@@ -220,6 +220,13 @@ export const SETTINGS_INFO = Object.freeze({
     bodyKey: "settings-info-launcher-hardware-acceleration-body",
     bodyFallback: "Linux GPU rendering. Turn off only for display issues. Restart required.",
   },
+  "hv-dpi-fix": {
+    titleKey: "hv-dpi-fix-label",
+    titleFallback: "Fix text scaling on high-DPI screens",
+    bodyKey: "settings-info-hv-dpi-fix-body",
+    bodyFallback:
+      "Windows only. Sets Mezeporta.exe's high DPI override to \"System\" (Properties > Compatibility), so game text is not broken on screens scaled above 100%. Applies from the next launcher start.",
+  },
   "launcher-sfx": {
     titleKey: "launcher-sfx-label",
     titleFallback: "Sound Effects",

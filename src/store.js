@@ -217,6 +217,7 @@ const storePrivate = reactive({
       launcherController: true,
       linuxHardwareAcceleration: true,
       offlineImages: false,
+      hvDpiFix: true,
     },
   launcherSuspended: false,
   launcherAssetsLoading: false,
@@ -2089,6 +2090,9 @@ function applyUiPrefs(prefs) {
   if (typeof prefs.offlineImages === "boolean") {
     storePrivate.settings.offlineImages = prefs.offlineImages;
   }
+  if (typeof prefs.hvDpiFix === "boolean") {
+    storePrivate.settings.hvDpiFix = prefs.hvDpiFix;
+  }
   applyLauncherResolutionPrefs(prefs);
 }
 
@@ -2152,6 +2156,7 @@ function saveUiPrefs() {
       launcherController: Boolean(storePrivate.settings.launcherController),
       linuxHardwareAcceleration: Boolean(storePrivate.settings.linuxHardwareAcceleration),
       offlineImages: Boolean(storePrivate.settings.offlineImages),
+      hvDpiFix: storePrivate.settings.hvDpiFix !== false,
       [classicKeys.width]: storePrivate.settings[classicKeys.width],
       [classicKeys.height]: storePrivate.settings[classicKeys.height],
       [classicCustomKey]: Boolean(storePrivate.settings[classicCustomKey]),
@@ -2421,6 +2426,9 @@ export async function initStore() {
   }
   if (storePrivate.settings.linuxHardwareAcceleration === undefined) {
     storePrivate.settings.linuxHardwareAcceleration = true;
+  }
+  if (storePrivate.settings.hvDpiFix === undefined) {
+    storePrivate.settings.hvDpiFix = true;
   }
   if (storePrivate.settings.offlineImages === undefined) {
     storePrivate.settings.offlineImages = false;
