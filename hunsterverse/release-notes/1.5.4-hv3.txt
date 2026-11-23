@@ -2,3 +2,5 @@ The Patch button moved next to "Online Players" so it no longer covers the CAPCO
 Event badges show what is running on Hunsterverse now (Speedrun Cup, VS Bracket, Raviente and more).
 Steam Deck: the game starts through Proton again (no more "failed to run wine reg").
 The header shows the launcher's real version again.
+Windows: game text no longer breaks on screens scaled above 100% (Settings: "Fix text scaling on high-DPI screens", on by default; works from the next launcher start).
+The Patch panel links to the full pre-release notes on the website.

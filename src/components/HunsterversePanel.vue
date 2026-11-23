@@ -17,6 +17,7 @@
 <script setup>
 import { ref, computed, watch, watchEffect, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api";
+import { open } from "@tauri-apps/api/shell";
 import { storeMut, doLogin } from "../store";
 import { CHARACTERS_PAGE } from "../common";
 import { hvPatchButton } from "./hvPatchButton";
@@ -188,6 +189,15 @@ async function choose(channel, confirm = false) {
   }
 }
 
+// The full pre-release notes: the Client patch tab of the website's Account page
+// (our own site, so no "leaving the launcher" prompt).
+const NOTES_URL = "https://frontier.hunsterverse.net/account.html#client-patch";
+function openNotes() {
+  open(NOTES_URL).catch((e) => {
+    errorText.value = "Could not open the browser: " + String(e || "");
+  });
+}
+
 function isChosen(channel) {
   return (status.value?.accountChannel || "stable") === channel;
 }
@@ -264,6 +274,9 @@ function isChosen(channel) {
                 </ul>
               </template>
             </div>
+            <p v-if="slots.length">
+              <a href="#" class="hv-link" @click.prevent="openNotes()">Full pre-release notes on the website</a>
+            </p>
             <p v-if="slots.length" class="hv-muted">
               Pre-release patches play only on the Test land. Switch back to Stable any time to play normally.
             </p>
@@ -386,6 +399,11 @@ function isChosen(channel) {
 }
 .hv-end {
   justify-content: flex-end;
+}
+.hv-link {
+  color: #f2c14e;
+  text-decoration: underline;
+  cursor: pointer;
 }
 .hv-notes {
   margin: 4px 0 4px 18px;
