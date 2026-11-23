@@ -137,6 +137,33 @@ password and is wiped by every SteamOS update.
 - To change keys: put the new public key in `hv_update.rs` and release that
   version signed with the **old** key; sign everything after with the new one.
 
+## Event badges (Hunsterverse events)
+
+The badges at the bottom of the character page (upstream's
+`src/activeEvents.js`) come from the wrapper's `/v2/server/status`, which
+builds them from Erupe's old config (Festa/Diva/Tournament overrides,
+EarthStatus) and the `events` table. On our server that only ever gives the
+Hunter Festa: our own events are not in those flags. For servers in
+`HUNSTERVERSE_HOSTS` the launcher also reads the REST API's public
+`/api/public/events/current` and `/api/public/festa` (the website's Events
+page, `js/events.js`; `hv_events.rs`, command `hv_live_events`), and
+`src/hvEvents.js` turns them into badges, with the website's rules:
+
+| Badge | Shown when | Art |
+|---|---|---|
+| Hunter Festa | the festa answer has a phase (entry, souls, judging, rewards); the panel names it | upstream |
+| Speedrun Cup | its row's cycle runs and the phase is open, tallying or results | upstream Hunting Tournament |
+| VS Bracket | its cycle runs: sign-up, drawing, a round, results (not upcoming or "no bracket") | ours, `VsBracket.png` |
+| Diva Defense | its cycle runs (personal, tactics, rewards, between) | upstream |
+| Event campaigns | open campaigns (the panel lists them) | ours, `Campaigns.png` |
+| MezFes, Sky Corridor (upstream Tenro art), Raviente, Hunting Road vote | always (no schedule) | upstream; Raviente and Road vote ours |
+
+Ours are drawn by `make_event_badges.py` (Raviente: the website's monster
+icon). If `events/current` does not answer, the badges are the wrapper's
+flags as before; if only `festa` fails, the wrapper's flag decides the Hunter
+Festa. Pallone Festival and Conquest still come from the wrapper's flags.
+Other servers are unchanged (`hv_live_events` answers null for them).
+
 ## Making a release
 
 1. Bump the version in `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`
@@ -172,4 +199,8 @@ launcher updates; launchers already updated stay on it until a newer release.
   server, account or game data): first login installs stable; the panel
   shows installed/served; pre-release with the confirmation, then back to
   Stable, with the game folder checked after each; a tampered update refused,
-  the signed one installed and restarted in place.
+  the signed one installed and restarted in place; the event badges from a
+  stand-in events API (classic and PS4 style, screenshots), and the
+  wrapper's flags while that API is down.
+- `node --test hunsterverse/tests/*.test.mjs`: the event badge rules
+  (`src/hvEvents.js`).

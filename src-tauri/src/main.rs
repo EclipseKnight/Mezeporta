@@ -11,6 +11,7 @@ mod altclient_stats;
 mod cli;
 mod config;
 mod endpoint;
+mod hv_events;
 mod hv_patch;
 mod hv_update;
 mod manifest;
@@ -5268,6 +5269,17 @@ async fn hv_set_patch_channel(
     }
 }
 
+/// Hunsterverse: the events running now, from our REST API (hv_events.rs).
+/// Null for other servers; an error when the API did not answer.
+#[tauri::command]
+async fn hv_live_events(state: tauri::State<'_, TauriState>) -> Result<Value, String> {
+    let host = state.state_sync.lock().await.current_endpoint.host();
+    match hv_patch::account_api_for(&host) {
+        Some(api) => hv_events::fetch(&state.client, &api).await,
+        None => Ok(Value::Null),
+    }
+}
+
 #[tauri::command]
 async fn hv_check_launcher_update(
     state: tauri::State<'_, TauriState>,
@@ -5693,7 +5705,8 @@ fn main() {
                     hv_patch_status,
                     hv_set_patch_channel,
                     hv_check_launcher_update,
-                    hv_install_launcher_update
+                    hv_install_launcher_update,
+                    hv_live_events
                 ])
                 .build(tauri::generate_context!())
             {

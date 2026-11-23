@@ -22,6 +22,10 @@
 #           API's confirmation, then the launcher logs in again and installs
 #           it; choosing Stable puts the stable files back and removes the
 #           added file; the account API holds each choice.
+#   events: the event badges come from the account API's events answers
+#           (e2e/events-current.json, festa.json; made-up quests), and from the
+#           game server's flags while that API is down. Screenshots go to
+#           SHOTS_DIR (default: $WORK/shots; set KEEP_WORK or SHOTS_DIR to keep them).
 #   update: a tampered download is refused with the file unchanged; the
 #           signed one replaces the binary and the launcher restarts into it
 #           in place (same PID).
@@ -110,6 +114,13 @@ grep -q " PUT /api/account/patch-channel 409" "$STATE/requests.log" || { echo "F
 [[ $(grep -c " PUT /api/account/patch-channel 200" "$STATE/requests.log") == 2 ]] || { echo "FAIL expected 2 saved choices" >&2; exit 1; }
 grep -q " GET /prerelease/mods/hvmods.dll 200" "$STATE/requests.log" || { echo "FAIL the pre-release file was not downloaded from its slot" >&2; exit 1; }
 echo "ok   API log: 409 confirmation, 2 saved choices; pre-release files came from /prerelease/mods"
+
+echo "== event badges"
+cp "$HERE/e2e/events-current.json" "$HERE/e2e/festa.json" "$STATE/"
+python3 -I "$HERE/e2e/drive.py" events "$GAME" "$STATE" "${SHOTS_DIR:-$WORK/shots}" || { tail -n 40 "$WORK/driver.out" >&2; exit 1; }
+grep -q " GET /api/public/events/current 200" "$STATE/requests.log" || { echo "FAIL the launcher did not read the events API" >&2; exit 1; }
+grep -q " GET /api/public/events/current 503" "$STATE/requests.log" || { echo "FAIL the fallback run did not try the events API" >&2; exit 1; }
+echo "ok   API log: events read, and tried while down"
 
 echo "== launcher self-update"
 cp "$NEXT_BIN" "$STATE/release/mezeporta-bin"

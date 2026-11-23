@@ -16,6 +16,9 @@ fake_servers.py STATE_DIR GAME_PORT API_PORT RELEASE_PORT
   POST /api/auth/signin, GET and PUT /api/account/patch-channel (409 with
   confirmationRequired for the first pre-release of an account that is not a
   playtester yet; PUT stable drops the role).
+  GET /api/public/events/current and /api/public/festa (the Events page's
+  answers) serve STATE_DIR/events-current.json and festa.json; while
+  STATE_DIR/events-down exists they answer 503.
 - RELEASE_PORT: static files from STATE_DIR/release (latest.json, binaries).
 
 Account: username "hunter", password "secret". The channel lives in
@@ -150,6 +153,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if sub == "check":
                 return self.serve_check(path_of("slots", slot))
             return self.serve_file(path_of("slots", slot), sub)
+        if p == "/v2/server/status":
+            # What the live wrapper answers (2026-11-23): its old-config flags only know the festa.
+            return self.answer(200, {"events": {"festaActive": True, "divaActive": False}})
         if p.startswith("/v2/") or p.startswith("/api/"):
             return self.answer(404, "not found", "text/plain")
         return self.serve_file(path_of("stable"), p.lstrip("/"))
@@ -197,6 +203,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 write("channel", channel)
                 return self.answer(200, {"channel": channel, "slot": channel[4:], "eligible": True,
                                          "message": "Pre-release patch \"%s\" on. Your Mezeporta launcher downloads it at its next login." % channel[4:]})
+        if p in ("/api/public/events/current", "/api/public/festa") and self.command == "GET":
+            # STATE_DIR/events-current.json and festa.json; STATE_DIR/events-down makes both fail.
+            name = "events-current.json" if p.endswith("current") else "festa.json"
+            if os.path.exists(path_of("events-down")) or not os.path.isfile(path_of(name)):
+                return self.answer(503, {"message": "unavailable"})
+            with open(path_of(name), "rb") as f:
+                return self.answer(200, f.read())
         return self.answer(404, {"message": "not found"})
 
     def release(self):

@@ -2,12 +2,17 @@
 """Drives the real launcher window through tauri-driver (W3C WebDriver) for
 test-e2e.sh. Standard library only.
 
-drive.py SCENARIO GAME_DIR STATE_DIR
+drive.py SCENARIO GAME_DIR STATE_DIR [SHOTS_DIR]
 
 SCENARIO:
   patch    log in, install the stable patch, switch to the pre-release "mods"
            (with the one-time confirmation), then back to Stable, checking the
            game folder after each step
+  events   the event badges come from the account API's events/current and
+           festa answers (STATE_DIR/events-current.json, festa.json); with
+           that API down, from the game server's flags (Hunter Festa only);
+           then the same in the PS4 style.
+           Screenshots go to SHOTS_DIR (optional 4th argument)
   update   the update bar: a tampered download is refused, then the signed one
            is installed and the launcher restarts into it
 Prints "ok ..." per check; exits 1 at the first failure.
@@ -210,6 +215,108 @@ def scenario_patch(game, state):
         s.close()
 
 
+BADGE_TITLES = """
+return [...document.querySelectorAll('.classic-event-badge-button, .ps4-event-badge-button')].map((e) => e.title);
+"""
+EVENT_PANEL = """
+for (const e of document.querySelectorAll('.eventpaneltextC, .eventpaneltext'))
+  if (e.querySelector('.eventpaneltextLabel')?.textContent.trim() === arguments[0]) return e.innerText;
+return null;
+"""
+# The fixture's events (e2e/events-current.json, festa.json), in the launcher's order.
+HV_BADGES = ["Hunter Festa", "Speedrun Cup", "VS Bracket", "Event campaigns",
+             "MezFes", "Sky Corridor", "Raviente", "Hunting Road vote"]
+
+
+def screenshot(s, shots, name):
+    if not shots:
+        return
+    import base64
+    os.makedirs(shots, exist_ok=True)
+    path = os.path.join(shots, name)
+    with open(path, "wb") as f:
+        f.write(base64.b64decode(call("GET", "/session/%s/screenshot" % s.id)))
+    ok("screenshot " + path)
+
+
+def character_page_badges(s, expect, what):
+    """Log in (installing a patch if one is offered) and wait for the badges."""
+    login(s)
+    end = time.time() + 90
+    titles = None
+    while time.time() < end:
+        s.js(CLICK_TEXT, "button", "Install")
+        titles = s.js(BADGE_TITLES)
+        if titles == expect:
+            # The badges pop in one by one: let them settle.
+            time.sleep(1.5)
+            return titles
+        time.sleep(0.5)
+    fail("%s: badges %r, expected %r" % (what, titles, expect))
+
+
+def open_badge(s, title):
+    s.js("""for (const e of document.querySelectorAll('.classic-event-badge-button, .ps4-event-badge-button'))
+              if (e.title === arguments[0]) { e.click(); return true; }
+            return false;""", title)
+    text = s.wait(EVENT_PANEL, "the %s panel" % title, 10, title)
+    time.sleep(0.5)  # the panel's pop-in transition
+    return text
+
+
+def scenario_events(game, state, shots=None):
+    exe = os.path.join(game, "mezeporta-bin")
+    s = Session(exe)
+    try:
+        character_page_badges(s, HV_BADGES, "with the events API")
+        ok("badges from the API: %s" % ", ".join(HV_BADGES))
+        screenshot(s, shots, "1-badges.png")
+        text = open_badge(s, "Hunter Festa")
+        if "Entry and vote" not in text:
+            fail("Hunter Festa panel: %r" % text)
+        ok("Hunter Festa panel names the phase (Entry and vote)")
+        screenshot(s, shots, "2-hunter-festa.png")
+        text = open_badge(s, "Speedrun Cup")
+        if "Speedrun Cup: Test Zinogre" not in text:
+            fail("Speedrun Cup panel: %r" % text)
+        ok("Speedrun Cup panel names the quest")
+        screenshot(s, shots, "3-speedrun-cup.png")
+    finally:
+        s.close()
+
+    open(os.path.join(state, "events-down"), "w").close()
+    s = Session(exe)
+    try:
+        character_page_badges(s, ["Hunter Festa"], "with the events API down")
+        ok("events API down: the game server's flags are used (Hunter Festa only)")
+        screenshot(s, shots, "4-api-down-fallback.png")
+    finally:
+        s.close()
+        os.remove(os.path.join(state, "events-down"))
+
+    # The PS4 style (style 3 in the launcher's store, Mezeporta/config.json).
+    set_style(game, 3)
+    s = Session(exe)
+    try:
+        character_page_badges(s, HV_BADGES, "PS4 style")
+        ok("PS4 style: the same badges")
+        screenshot(s, shots, "5-ps4-badges.png")
+        open_badge(s, "VS Bracket")
+        screenshot(s, shots, "6-ps4-vs-bracket.png")
+    finally:
+        s.close()
+        set_style(game, 1)
+
+
+def set_style(game, style):
+    path = os.path.join(game, "Mezeporta", "config.json")
+    with open(path) as f:
+        cfg = json.load(f)
+    cfg["style"] = style
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
 def launcher_pids(exe):
     pids = []
     for pid in os.listdir("/proc"):
@@ -288,6 +395,9 @@ def scenario_update(game, state):
 
 def main():
     scenario, game, state = sys.argv[1:4]
+    if scenario == "events":
+        shots = os.path.abspath(sys.argv[4]) if len(sys.argv) > 4 else None
+        return scenario_events(os.path.abspath(game), os.path.abspath(state), shots)
     {"patch": scenario_patch, "update": scenario_update}[scenario](os.path.abspath(game), os.path.abspath(state))
 
 

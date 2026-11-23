@@ -18,6 +18,8 @@ export const EMPTY_ALT_CLIENT_STATS = {
   },
   characters: [],
   onlineFriends: [],
+  // Hunsterverse: our REST API's events (hv_live_events, src/hvEvents.js); null elsewhere.
+  hunsterverseEvents: null,
 };
 
 let devAltClientStatsOverride = null;
@@ -59,13 +61,28 @@ export function setDevAltClientStatsOverride(value) {
   devAltClientStatsOverride = value && typeof value === "object" ? cloneStats(value) : null;
 }
 
-export async function getAltClientStats() {
+// Hunsterverse: the events running now from our REST API; null for other
+// servers or when the API does not answer (the badges then use the wrapper's flags).
+async function getHunsterverseEvents() {
   try {
-    const stats = await invoke("get_alt_client_stats");
-    return applyDevAltClientStatsOverride(stats ?? { ...EMPTY_ALT_CLIENT_STATS });
+    return (await invoke("hv_live_events")) ?? null;
   } catch (_error) {
-    return applyDevAltClientStatsOverride({ ...EMPTY_ALT_CLIENT_STATS });
+    return null;
   }
+}
+
+export async function getAltClientStats() {
+  const hunsterverseEvents = getHunsterverseEvents();
+  let stats;
+  try {
+    stats = (await invoke("get_alt_client_stats")) ?? { ...EMPTY_ALT_CLIENT_STATS };
+  } catch (_error) {
+    stats = { ...EMPTY_ALT_CLIENT_STATS };
+  }
+  return {
+    ...applyDevAltClientStatsOverride(stats),
+    hunsterverseEvents: await hunsterverseEvents,
+  };
 }
 
 export async function getAltClientDistributions(characterId, offset = 0, limit = 6) {

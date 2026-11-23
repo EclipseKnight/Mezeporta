@@ -1,0 +1,19 @@
+{
+  "now": "2026-11-27T12:00:00Z",
+  "events": [
+    {"event": "speedrun_cup", "cycle": 2, "phase": "results",
+     "startsAt": "2026-11-19T15:00:00Z", "endsAt": "2026-11-28T15:00:00Z", "phaseEndsAt": "2026-11-28T15:00:00Z",
+     "extra": {"quest": {"title": "Speedrun Cup: Test Zinogre"}}, "stale": false},
+    {"event": "vs_bracket", "cycle": 1, "phase": "signup",
+     "startsAt": "2026-11-26T15:00:00Z", "endsAt": "2026-12-10T15:00:00Z", "phaseEndsAt": "2026-11-29T15:00:00Z",
+     "extra": {"round": 0, "rounds": 0, "entrants": 5, "signup_ends_at": "2026-11-29T15:00:00Z"}, "stale": false},
+    {"event": "diva", "cycle": 1797822000, "phase": "upcoming",
+     "startsAt": "2026-12-21T03:00:00Z", "endsAt": "2027-01-11T02:00:00Z", "phaseEndsAt": "2026-12-21T03:00:00Z",
+     "extra": {}, "stale": false},
+    {"event": "campaigns", "cycle": 0, "phase": "open", "startsAt": null, "endsAt": null, "phaseEndsAt": null,
+     "extra": {"campaigns": [
+       {"id": 1, "title": "New & Returning Hunter Pack", "reward_text": "Potions, buffs and tickets. Once per hunter."},
+       {"id": 2, "title": "Weekly Supply Drop", "reward_text": "Fresh supplies every week (Monday 00:00 JST)."}]},
+     "stale": false}
+  ]
+}

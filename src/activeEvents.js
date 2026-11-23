@@ -1,4 +1,19 @@
 import { assetUrl } from "./store";
+import { hunsterverseDecides, hunsterverseEventBadges } from "./hvEvents";
+
+// Hunsterverse: badge art of our events (src/hvEvents.js ids). The first five
+// are upstream's; the others were added for our events.
+const HUNSTERVERSE_EVENT_IMAGES = {
+  "hunter-festa": "/extra/HunterFesta.png",
+  "hunting-tournament": "/extra/HuntingTournament.png",
+  diva: "/extra/Diva.png",
+  mezfes: "/extra/Mezfes.png",
+  tenro: "/extra/Tenro.png",
+  "vs-bracket": "/extra/VsBracket.png",
+  campaigns: "/extra/Campaigns.png",
+  raviente: "/extra/Raviente.png",
+  "road-vote": "/extra/RoadVote.png",
+};
 
 const SPECIAL_EVENT_DEFS = [
   {
@@ -133,8 +148,22 @@ export function buildActiveEventBadges(serverInfo, helpers = {}) {
 
   const badges = [];
   const activeIds = new Set();
+
+  // Hunsterverse: our REST API's events replace the wrapper's flags for the
+  // events it knows; the flags still add the others (Pallone, Conquest).
+  const hvAnswer = serverInfo?.hunsterverseEvents;
+  const hvBadges = hunsterverseEventBadges(hvAnswer, {
+    formatTime: (value) => formatUnixSeconds(Math.floor(Date.parse(value) / 1000)),
+  });
+  if (hvBadges) {
+    for (const badge of hvBadges) {
+      badges.push(eventBadge({ ...badge, image: HUNSTERVERSE_EVENT_IMAGES[badge.id] }));
+    }
+    for (const id of hunsterverseDecides(hvAnswer)) activeIds.add(id);
+  }
+
   const mezFes = serverInfo?.mezFes;
-  if (isMezFesActive(mezFes)) {
+  if (!activeIds.has("mezfes") && isMezFesActive(mezFes)) {
     const stalls = Array.isArray(mezFes.stalls) ? mezFes.stalls : [];
     badges.push(
       eventBadge({
