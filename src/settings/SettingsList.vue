@@ -447,6 +447,10 @@ const showLauncherResolutionSetting = computed(() =>
 const showLinuxHardwareAccelerationSetting = computed(
   () => isLinuxHost.value && store.settings.devMode
 );
+// Hunsterverse (hv3): Windows only (hv_dpi.rs); Wine/Proton ignore it.
+const showHvDpiFixSetting = computed(
+  () => hostPlatformReady.value && !isLinuxHost.value
+);
 const showWinePrefixSettings = computed(() =>
   isLinuxHost.value &&
   (storeMut.style === CLASSIC_STYLE || storeMut.style === PS4_STYLE)
@@ -2165,6 +2169,14 @@ function onMaxCharDisplayNumberInput(value) {
           @update:model-value="setUiPref('linuxHardwareAcceleration', $event)"
           :name="$t('launcher-hardware-acceleration-label', 'Hardware Acceleration')"
           info-key="launcher-hardware-acceleration"
+        />
+
+        <SettingsCheckbox
+          v-if="showHvDpiFixSetting"
+          :model-value="store.settings.hvDpiFix !== false"
+          @update:model-value="setUiPref('hvDpiFix', $event)"
+          :name="$t('hv-dpi-fix-label', 'Fix text scaling on high-DPI screens')"
+          info-key="hv-dpi-fix"
         />
 
         <SettingsCheckbox

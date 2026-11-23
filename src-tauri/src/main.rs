@@ -11,6 +11,7 @@ mod altclient_stats;
 mod cli;
 mod config;
 mod endpoint;
+mod hv_dpi;
 mod hv_patch;
 mod hv_update;
 mod manifest;
@@ -2425,6 +2426,8 @@ struct UiPrefs {
     launcher_controller: bool,
     linux_hardware_acceleration: bool,
     offline_images: bool,
+    // Hunsterverse (hv3): "Fix text scaling on high-DPI screens" (hv_dpi.rs).
+    hv_dpi_fix: bool,
 }
 
 impl Default for UiPrefs {
@@ -2448,6 +2451,7 @@ impl Default for UiPrefs {
             launcher_controller: true,
             linux_hardware_acceleration: true,
             offline_images: false,
+            hv_dpi_fix: true,
         }
     }
 }
@@ -3203,6 +3207,9 @@ async fn set_ui_pref(
         }
         ("offlineImages", serde_json::Value::Bool(v)) => {
             state_sync.ui_prefs.offline_images = v;
+        }
+        ("hvDpiFix", serde_json::Value::Bool(v)) => {
+            state_sync.ui_prefs.hv_dpi_fix = v;
         }
         _ => return Ok(()),
     }
@@ -5722,6 +5729,8 @@ fn main() {
 
             let state_sync = state_sync.blocking_lock();
             if let Some(ExitSignal::RunGame(char_id, char_new)) = state_sync.exit_reason {
+                // Hunsterverse (hv3): high-DPI override for the game's process (Windows only).
+                hv_dpi::apply_before_game(state_sync.ui_prefs.hv_dpi_fix);
                 let preload_controller_dlls = if cfg!(windows) {
                     state_sync.launcher_prefs.preload_controller_dlls
                 } else {
