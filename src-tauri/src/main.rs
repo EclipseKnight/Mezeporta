@@ -5355,13 +5355,25 @@ async fn hv_check_launcher_update(
 /// Downloads, checks and installs the update, then restarts into it. Returns
 /// only on failure (the launcher keeps running the old version).
 #[tauri::command]
-async fn hv_install_launcher_update(state: tauri::State<'_, TauriState>) -> Result<(), String> {
+async fn hv_install_launcher_update(
+    window: tauri::Window,
+    state: tauri::State<'_, TauriState>,
+) -> Result<(), String> {
     let exe = launcher_exe().ok_or("Cannot find the launcher's own file.")?;
     let manifest = match state.state_sync.lock().await.hv_update_manifest.clone() {
         Some(m) => m,
         None => hv_update::fetch_manifest(&state.client).await?,
     };
-    hv_update::download_and_install(&state.client, &manifest, exe, hv_update::PUBLIC_KEY).await?;
+    // Hunsterverse (1.5.4-hv5): the UAC prompt of an update that needs
+    // administrator rights belongs to the launcher window.
+    #[cfg(windows)]
+    let hwnd = window.hwnd().ok().map(|h| h.0);
+    #[cfg(not(windows))]
+    let hwnd = {
+        let _ = &window;
+        None
+    };
+    hv_update::download_and_install(&state.client, &manifest, exe, hv_update::PUBLIC_KEY, hwnd).await?;
     {
         let mut state_sync = state.state_sync.lock().await;
         cancel_all_requests(&mut state_sync);
@@ -5518,6 +5530,13 @@ impl From<&server::FriendData> for mhf_iel::FriendData {
 }
 
 fn main() {
+    // Hunsterverse (1.5.4-hv5): the elevated step of a launcher update (started
+    // through the UAC prompt by hv_update::install): swap the file and exit,
+    // before any window, CLI mode or single-instance lock.
+    if let Some(code) = hv_update::run_apply_update_helper() {
+        std::process::exit(code);
+    }
+
     // Check for CLI mode before single-instance check.
     // A console-subsystem executable launched from cmd waits for us to exit,
     // so stdin is properly owned by this process.

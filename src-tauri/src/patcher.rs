@@ -20,6 +20,19 @@ use tokio_util::sync::CancellationToken;
 
 pub const NETWORK_ERROR: &str = "patcher-network-error";
 pub const FILE_ERROR: &str = "patcher-file-error";
+/// Hunsterverse (1.5.4-hv5): the game folder refuses changes (access denied:
+/// under Program Files, or files an administrator created). The message
+/// (locale/*.ftl) says how to fix it; the launcher does not patch elevated.
+pub const PERMISSION_ERROR: &str = "patcher-permission-error";
+
+/// Hunsterverse (1.5.4-hv5): the error key for a failed file operation.
+pub(crate) fn file_error(e: &io::Error) -> &'static str {
+    if e.kind() == io::ErrorKind::PermissionDenied {
+        PERMISSION_ERROR
+    } else {
+        FILE_ERROR
+    }
+}
 /// Hunsterverse (1.5.4-hv4): the player cancelled the run (internal, never
 /// shown: the frontend has already left the patcher page).
 const CANCELLED: &str = "patcher-cancelled";
@@ -428,13 +441,13 @@ async fn download_changed_paths(
             send_event(window, total, current, State::Downloading, queue_position);
         }
         let patcher_path = patcher_folder.join(&changed_path.target_path);
-        fs::create_dir_all(patcher_path.parent().ok_or(FILE_ERROR)?).or(Err(FILE_ERROR))?;
+        fs::create_dir_all(patcher_path.parent().ok_or(FILE_ERROR)?).map_err(|e| file_error(&e))?;
         let mut file = fs::OpenOptions::new()
             .write(true)
             .truncate(true)
             .create(true)
             .open(&patcher_path)
-            .or(Err(FILE_ERROR))?;
+            .map_err(|e| file_error(&e))?;
         while let Some(chunk) = select! {
             _ = cancel.cancelled() => return Err(CANCELLED),
             chunk = timeout(PATCH_IDLE_TIMEOUT, resp.chunk()) => chunk.or(Err(NETWORK_ERROR))?.or(Err(NETWORK_ERROR))?
@@ -468,12 +481,12 @@ fn move_changed_paths(
         let source = source_folder.join(rel);
         let target = target_folder.join(rel);
 
-        fs::create_dir_all(target.parent().ok_or(FILE_ERROR)?).or(Err(FILE_ERROR))?;
+        fs::create_dir_all(target.parent().ok_or(FILE_ERROR)?).map_err(|e| file_error(&e))?;
 
         let was_added = manifest.added_files.iter().any(|item| item == rel);
         if was_added {
             if target.exists() {
-                remove_file_force(&target).or(Err(FILE_ERROR))?;
+                remove_file_force(&target).map_err(|e| file_error(&e))?;
             }
             // Clean up any stale backup from older buggy runs.
             let stale_backup = backup_name(&target);
@@ -486,12 +499,12 @@ fn move_changed_paths(
             match backup_original(&target) {
                 Ok(true) => record_manifest_entry(manifest, rel, true),
                 Ok(false) => record_manifest_entry(manifest, rel, false),
-                Err(_) => return Err(FILE_ERROR),
+                Err(e) => return Err(file_error(&e)),
             }
         }
-        manifest.save(target_folder, server).or(Err(FILE_ERROR))?;
+        manifest.save(target_folder, server).map_err(|e| file_error(&e))?;
 
-        rename_force(&source, &target).or(Err(FILE_ERROR))?;
+        rename_force(&source, &target).map_err(|e| file_error(&e))?;
     }
     Ok(())
 }
@@ -909,7 +922,7 @@ pub async fn patch(
             send_event(&window, 0, 0, State::Restoring, 0);
             if let Err(e) = restore_server(&game_folder, &prev_server) {
                 warn!("failed to restore {prev_server}: {e}");
-                send_error(&window, FILE_ERROR);
+                send_error(&window, file_error(&e));
                 return;
             }
         }
@@ -940,14 +953,14 @@ pub async fn patch(
         send_event(&window, 0, 0, State::Restoring, 0);
         if let Err(e) = restore_server(&game_folder, &prev_server) {
             warn!("failed to restore {prev_server}: {e}");
-            send_error(&window, FILE_ERROR);
+            send_error(&window, file_error(&e));
             return;
         }
     } else if same_server && !prev_server.is_empty() {
         send_event(&window, 0, 0, State::Restoring, 0);
         if let Err(e) = restore_server(&game_folder, &target_server) {
             warn!("failed to restore {target_server} before update: {e}");
-            send_error(&window, FILE_ERROR);
+            send_error(&window, file_error(&e));
             return;
         }
     }
@@ -959,7 +972,7 @@ pub async fn patch(
     let tmp_folder = game_folder.join("tmp");
     if let Err(e) = fs::create_dir_all(&tmp_folder) {
         warn!("error creating patcher dir: {}", e);
-        send_error(&window, FILE_ERROR);
+        send_error(&window, file_error(&e));
         return;
     }
 
@@ -1042,6 +1055,18 @@ mod hv_tests {
 
     fn changed(rel: &str) -> ChangedPath {
         ChangedPath { target_path: rel.into(), source_path: rel.into(), hash: String::new() }
+    }
+
+    #[test]
+    fn hv_access_denied_gets_its_own_message() {
+        // Hunsterverse (1.5.4-hv5): a protected game folder (Program Files)
+        // says how to fix it instead of the generic file error.
+        assert_eq!(file_error(&io::Error::from(io::ErrorKind::PermissionDenied)), PERMISSION_ERROR);
+        assert_eq!(file_error(&io::Error::from(io::ErrorKind::NotFound)), FILE_ERROR);
+        let en = include_str!("../../locale/en.ftl");
+        let jp = include_str!("../../locale/jp.ftl");
+        let key = format!("{PERMISSION_ERROR} = ");
+        assert!(en.contains(&key) && jp.contains(&key), "both locales have {PERMISSION_ERROR}");
     }
 
     #[test]

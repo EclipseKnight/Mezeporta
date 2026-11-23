@@ -34,6 +34,11 @@ This is the Mezeporta launcher v1.5.4 by LilButter
   pre-release and back takes them from there instead of downloading them
   again (each file's hash is checked first). Settings, "Reset patched files"
   also deletes them.
+- 1.5.4-hv5 (2026-11-23): Windows: when the launcher is in a protected
+  folder (such as Program Files), its updates ask for administrator rights
+  with the Windows prompt instead of failing with "access is denied".
+  Patching a protected game folder says so and how to fix it (move the game
+  folder somewhere you own, e.g. C:\Games).
 
 Source code: Mezeporta-v{version}-source.zip on the same release page
 (https://github.com/EclipseKnight/Mezeporta/releases), and the git history of

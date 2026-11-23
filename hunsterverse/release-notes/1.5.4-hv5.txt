@@ -1,0 +1,4 @@
+Windows: when the launcher is in a protected folder (such as Program Files), its updates now ask for administrator rights with the Windows prompt instead of failing with "access is denied". Say No and the launcher stays as it was and tells you how to fix it.
+If the update is still refused with administrator rights, the launcher names the file and asks you to close other Mezeporta windows and check your antivirus.
+Patching a game folder Windows protects now says so, with the fix: move the game folder somewhere you own, e.g. C:\Games.
+Linux and Steam Deck: if the launcher's folder cannot be written, the update says which folder and keeps the launcher as it was.

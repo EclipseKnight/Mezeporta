@@ -174,6 +174,7 @@ remote-messages-error = グローバルメッセージを取得できません
 launcher-network-error = ランチャーサーバーへの接続に失敗しました
 patcher-network-error = パッチサーバーへの接続に失敗しました
 patcher-file-error = ゲームフォルダー内のファイル管理に失敗しました
+patcher-permission-error = ゲームフォルダー内のファイルを変更できません（アクセス拒否）。Program Files などの保護された場所にあるか、ファイルが管理者のものです。ゲームフォルダーを自分のフォルダー（例: C:\Games、Linux ではホームフォルダー）に移動し、そこからランチャーを起動してください。
 internal-error = ランチャーエラーです。ログを確認してください
 
 # Remote

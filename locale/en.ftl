@@ -174,6 +174,7 @@ remote-messages-error = Unable to fetch global messages
 launcher-network-error = Launcher failed to connect to launcher server
 patcher-network-error = Patcher failed to connect to patcher server
 patcher-file-error = Patcher failed to manage files in game folder
+patcher-permission-error = Patcher cannot change files in the game folder (access denied): it is in a protected place such as Program Files, or its files belong to an administrator. Move the game folder somewhere you own (e.g. C:\Games, or your home folder on Linux) and start the launcher from there.
 internal-error = Launcher error, check logs
 
 # Remote

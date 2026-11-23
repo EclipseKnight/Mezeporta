@@ -11,6 +11,7 @@ this folder, `src-tauri/src/hv_*.rs` and `src/components/HunsterversePanel.vue`.
 | 1.5.4-hv2 (2026-11-23) | Client patch choice, launcher self-update, safer patching (below) |
 | 1.5.4-hv3 (2026-11-23) | The Patch button moved off the CAPCOM logo (classic: in the footer after "Online Players"; PS4 style: right of Settings), part of the launcher layout so it scales with the window; the header's "release ver." comes from `tauri.conf.json` (hv2 still said hv1); event badges from the website's event list (below); Proton on the Steam Deck (below) |
 | 1.5.4-hv4 (2026-11-23) | Downloaded patch files are kept per server (patch cache, below): switching Stable <-> pre-release takes them from there instead of downloading again. Cancelling a patch stops it (nothing moves into the game folder); on Windows the return from the game to the launcher starts a fresh launcher process (below); `Mezeporta-Linux.zip` stores `mezeporta-bin` and the `*.sh` files as executable (below) |
+| 1.5.4-hv5 (2026-11-23) | A self-update that needs administrator rights (launcher in Program Files, or files an administrator created) asks for them with the UAC prompt on Windows instead of failing with "access is denied"; clear messages when the prompt is declined, when it is still denied, on Linux, and when patching a protected game folder (below) |
 
 ## Client patch choice (hv2)
 
@@ -176,6 +177,69 @@ changes them must say "run the installer again" in its notes.
 Override for tests or staging: `MEZEPORTA_UPDATE_URL=<url of a latest.json>`
 (the signature check still applies).
 
+### Updates that need administrator rights (hv5)
+
+Report (2026-11-23): on Windows the update failed with "cannot move the
+running launcher aside (...): Access is denied"; "Run as administrator"
+fixed it. Cause: the launcher was in a folder the player cannot change
+(under Program Files, or its files were created by an elevated process).
+Our Windows build's manifest has no `requestedExecutionLevel`, so as a
+32-bit program it runs with UAC file virtualization: in Program Files,
+writing `Mezeporta.exe.new` "works" (Windows redirects it to
+`%LOCALAPPDATA%\VirtualStore`), but renaming the real `Mezeporta.exe` is
+denied. (We keep it that way: an `asInvoker` manifest would end the
+virtualization that lets such installs save `Mezeporta/config.json` at
+all.)
+
+Now (`hv_update::install`):
+
+1. The launcher tests its folder (creates and deletes a file). Writable: the
+   swap as before. A swap that fails with access denied (step 4 of the
+   list above, or removing an earlier `.old`) goes on to step 2; any other
+   failure is shown as before.
+2. Not writable or denied, Windows: the verified file is saved in the
+   player's temp folder (`%TEMP%\Mezeporta-update-<pid>-<n>\`) and the
+   installed launcher is started elevated (`ShellExecuteExW`, verb `runas`,
+   the UAC prompt, no window) as `Mezeporta.exe --hv-apply-update <file>
+   <signature>`. That step (`run_apply_update_helper`, first thing in
+   `main`) reads the file once, checks those bytes against the public key
+   built into it and that they are a Windows program, writes them beside
+   itself and swaps (the same `replace_executable`), then exits. It only
+   replaces its own file and never moves the temp file, so a program of the
+   player that changes the temp file in between gets a refusal, not an
+   elevated swap. The elevated program is the installed launcher (in the
+   protected folder), never the download.
+3. The normal launcher then restarts into the new version as before, so
+   neither the launcher nor the game runs elevated.
+
+Messages (the old launcher keeps working in every case; nothing is half
+replaced):
+
+| Case | Message (shortened) |
+|---|---|
+| Prompt declined | "The update needs administrator rights because the launcher is in <folder>. Click Update and restart again and allow the Windows prompt, or move the game folder somewhere you own, e.g. C:\Games." |
+| Elevated and still denied, or the file in use | "Windows refused to replace <exe> even with administrator rights. Close every other Mezeporta window and check that your antivirus is not blocking or scanning Mezeporta.exe." |
+| Linux / Steam Deck, folder not writable | "The update cannot write to the launcher's folder <folder>. Make that folder writable for your user (or move the game folder into your home folder)." |
+
+The new launcher cannot delete the `.old` an elevated update left (it is
+not elevated); that is only logged, and the next elevated update removes
+it first.
+
+Launchers up to hv4 have the old behaviour: on a protected install they
+need "Run as administrator" once to take this update.
+
+Patching (`patcher.rs`, same folder, same cause): renaming a game file to
+`*.mezeb` in a protected folder is denied too. It is not done elevated; a
+denied file operation now shows `patcher-permission-error` ("Patcher cannot
+change files in the game folder (access denied) ... Move the game folder
+somewhere you own, e.g. C:\Games") instead of the generic file error. The
+rollback of a half-done patch is unchanged.
+
+Testing the UAC step needs Windows (steps in the hv5 report; summary: put
+the hv5 build in `C:\Program Files\Hunsterverse` as an administrator, run
+it as a normal user against a test `latest.json` of a higher version via
+`MEZEPORTA_UPDATE_URL`).
+
 ### Why our own updater, not Tauri's
 
 Tauri 1's updater replaces an AppImage on Linux and runs an MSI or NSIS
@@ -297,6 +361,11 @@ launcher updates; launchers already updated stay on it until a newer release.
   miss, a corrupted cache file, a download that does not match its hash,
   per-server folders, cleanup order and the size cap, `hv_patch_cache`). (The
   `--target` matters: `.cargo/config.toml` defaults to Windows i686.)
+  Since hv5 also the update decision (writable folder: in place; access
+  denied or not writable: the elevated step; declined, still denied, Linux
+  messages), the elevated step's own check of the bytes (changed file,
+  wrong key, not an executable, then a good swap) and the patcher's
+  access-denied message.
 - `hunsterverse/test-e2e.sh NEW_BIN NEXT_BIN` (env `NEXT_VERSION`, `NEW_VERSION`,
   `SCENARIOS`, `SHOTS`: see the script's header): the real Linux launcher under
   Xvfb, driven through tauri-driver, against local stand-ins of the wrapper,
