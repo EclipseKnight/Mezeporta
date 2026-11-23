@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Builds our launcher zip from upstream's release zip, for build-release.sh.
+
+pack_launcher_zip.py UPSTREAM_ZIP BINARY_NAME NEW_BINARY README LICENSE VERSION OUT_ZIP
+
+Copies every entry of UPSTREAM_ZIP in its order, with its bytes, compression
+and attributes, except BINARY_NAME, whose content becomes NEW_BINARY (same
+name and attributes, deflated). Adds README (with {version} filled in)
+followed by LICENSE (the GPL text), CRLF, as Mezeporta-hv-README.txt. Same
+inputs give the same bytes (fixed dates).
+"""
+import sys
+import zipfile
+
+DATE = (2026, 11, 23, 0, 0, 0)
+README_NAME = "Mezeporta-hv-README.txt"
+OLD_README_NAMES = {"Mezeporta-hv1-README.txt"}
+
+
+def main():
+    upstream, binary_name, new_binary, readme, licence, version, out = sys.argv[1:8]
+    replaced = False
+    with zipfile.ZipFile(upstream) as src, zipfile.ZipFile(out, "w") as dst:
+        for info in src.infolist():
+            if info.filename == README_NAME or info.filename in OLD_README_NAMES:
+                continue
+            if info.filename == binary_name:
+                new = zipfile.ZipInfo(info.filename, DATE)
+                new.external_attr = info.external_attr
+                new.create_system = info.create_system
+                new.compress_type = zipfile.ZIP_DEFLATED
+                with open(new_binary, "rb") as f:
+                    dst.writestr(new, f.read(), compresslevel=9)
+                replaced = True
+            else:
+                dst.writestr(info, src.read(info.filename))
+        if not replaced:
+            sys.exit(f"{binary_name} not in {upstream}")
+        with open(readme, encoding="utf-8") as f:
+            text = f.read().replace("{version}", version)
+        with open(licence, encoding="utf-8") as f:
+            text += "\n" + f.read()
+        text = text.replace("\r\n", "\n").replace("\n", "\r\n")
+        info = zipfile.ZipInfo(README_NAME, DATE)
+        info.external_attr = 0o644 << 16
+        info.compress_type = zipfile.ZIP_DEFLATED
+        dst.writestr(info, text.encode("utf-8"), compresslevel=9)
+
+
+if __name__ == "__main__":
+    main()

@@ -21,6 +21,8 @@ import {
 } from "./store";
 import ClassicLauncher from "./classic/Launcher.vue";
 import Ps4Launcher from "./ps4/Launcher.vue";
+// Hunsterverse (1.5.4-hv2): launcher self-update bar and the client patch choice.
+import HunsterversePanel from "./components/HunsterversePanel.vue";
 import {
   CLASSIC_STYLE,
   PS4_STYLE,
@@ -351,6 +353,8 @@ registerEventListener("game_launch", () => {
         />
       </template>
     </div>
+
+    <HunsterversePanel v-if="initialLoaded" />
 
     <div
       v-if="overlayState.visible"

@@ -1,0 +1,3 @@
+Choose your client patch in the launcher: Stable or a pre-release (same setting as the website's Account page).
+The launcher now updates itself from our GitHub releases.
+A patch that fails half-way puts your game files back as they were.

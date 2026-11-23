@@ -1,0 +1,4 @@
+# Build outputs (Hunsterverse fork; upstream had no ignore file)
+node_modules/
+dist/
+src-tauri/target/

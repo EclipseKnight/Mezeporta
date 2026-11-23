@@ -1,3 +1,4 @@
+use crate::hv_patch;
 use crate::manifest::Manifest;
 use crate::{server::PatcherResponse, LogPayload};
 use log::{info, warn};
@@ -398,11 +399,17 @@ async fn download_changed_paths(
     Ok(())
 }
 
+// Changed by Hunsterverse (1.5.4-hv2): the manifest is saved after each file
+// is recorded and before it is moved, so a move that fails half-way (a file in
+// use on Windows, a full disk, a crash) leaves a manifest that lists every file
+// already touched, and restore_server can put the folder back (patch_internal
+// does that at once).
 fn move_changed_paths(
     changed_paths: &[ChangedPath],
     source_folder: &Path,
     target_folder: &Path,
     manifest: &mut Manifest,
+    server: &str,
 ) -> Result<(), &'static str> {
     for changed_path in changed_paths {
         let rel = changed_path.target_path.as_str();
@@ -430,10 +437,26 @@ fn move_changed_paths(
                 Err(_) => return Err(FILE_ERROR),
             }
         }
+        manifest.save(target_folder, server).or(Err(FILE_ERROR))?;
 
         rename_force(&source, &target).or(Err(FILE_ERROR))?;
     }
     Ok(())
+}
+
+/// Hunsterverse (1.5.4-hv2): after move_changed_paths failed, put the game
+/// folder back as it was before the patch and forget this server's patch state.
+/// If the restore itself fails (a file still in use), keep the manifest so the
+/// next login's restore can finish it, and drop only the ETag so that login
+/// patches again.
+fn rollback_failed_move(root: &Path, server: &str) {
+    match restore_server(root, server) {
+        Ok(()) => clear_server_patch_state(root, server),
+        Err(e) => {
+            warn!("restore after a failed patch failed: {}", e);
+            let _ = fs::remove_file(server_cache_root(root, server).join(CLIENT_ETAG_FILE));
+        }
+    }
 }
 
 fn record_manifest_entry(manifest: &mut Manifest, rel: &str, modified: bool) {
@@ -457,7 +480,11 @@ fn restore_backup_files(root: &Path) -> io::Result<()> {
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.is_dir() {
+            // Changed by Hunsterverse (1.5.4-hv2): file_type() does not follow
+            // symlinks (path.is_dir() did), so a portable Wine prefix in the
+            // game folder (dosdevices/z: -> /) no longer sends this walk over
+            // the whole disk, renaming backups outside the game folder.
+            if entry.file_type()?.is_dir() {
                 stack.push(path);
                 continue;
             }
@@ -735,9 +762,18 @@ async fn patch_internal(
     // Patch files in place and persist the manifest.
     send_event(window, 0, 0, State::Patching, 0);
 
-    let mut manifest = Manifest::load(game_folder, &patcher_resp.server_name);
-    move_changed_paths(&changed_paths, patcher_folder, game_folder, &mut manifest)?;
-    cache_server_files(game_folder, &patcher_resp.server_name, &changed_paths)?;
+    let server = patcher_resp.server_name.as_str();
+    let mut manifest = Manifest::load(game_folder, server);
+    if let Err(e) = move_changed_paths(&changed_paths, patcher_folder, game_folder, &mut manifest, server) {
+        // Hunsterverse (1.5.4-hv2): never leave a half-patched folder. Put back
+        // every file this run already replaced or added (the manifest lists
+        // them), as before the patch, and forget this server's patch state so
+        // the next login starts over.
+        warn!("moving patch files failed, restoring the game folder");
+        rollback_failed_move(game_folder, server);
+        return Err(e);
+    }
+    cache_server_files(game_folder, server, &changed_paths)?;
 
     manifest
         .save(game_folder, &patcher_resp.server_name)
@@ -781,6 +817,7 @@ pub async fn patch(
         if let Err(e) = write_server_etag(&game_folder, &target_server, &target_etag) {
             warn!("failed to update {}: {}", CLIENT_ETAG_FILE, e);
         }
+        hv_patch::record_installed(&game_folder, &target_server, &patcher_url, &target_etag);
         send_event(&window, 0, 0, State::Done, 0);
         return;
     }
@@ -812,6 +849,7 @@ pub async fn patch(
         if let Err(e) = write_server_etag(&game_folder, &target_server, &target_etag) {
             warn!("failed to update {}: {}", CLIENT_ETAG_FILE, e);
         }
+        hv_patch::record_installed(&game_folder, &target_server, &patcher_url, &target_etag);
         send_event(&window, 0, 0, State::Done, 0);
         return;
     }
@@ -843,6 +881,7 @@ pub async fn patch(
         return;
     }
 
+    let patcher_url_for_record = patcher_url.clone();
     if let Err(e) = patch_internal(
         &window,
         client,
@@ -876,9 +915,96 @@ pub async fn patch(
     if let Err(e) = write_server_etag(&game_folder, &target_server, &target_etag) {
         warn!("failed to cache {}: {}", CLIENT_ETAG_FILE, e);
     }
+    hv_patch::record_installed(&game_folder, &target_server, &patcher_url_for_record, &target_etag);
 }
 #[tauri::command]
 pub async fn reset_game_files(game_folder: String) -> Result<(), String> {
     let root = PathBuf::from(&game_folder);
     reset_game_files_internal(&root)
+}
+
+#[cfg(test)]
+mod hv_tests {
+    //! Hunsterverse (1.5.4-hv2): a patch that fails while moving files leaves
+    //! the folder as it was; the restore walk stays inside the game folder.
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hv-patcher-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn changed(rel: &str) -> ChangedPath {
+        ChangedPath { target_path: rel.into(), source_path: rel.into() }
+    }
+
+    #[test]
+    fn failed_move_is_rolled_back() {
+        let root = scratch("rollback");
+        let game = root.join("game");
+        let tmp = game.join("tmp");
+        fs::create_dir_all(game.join("dat")).unwrap();
+        fs::create_dir_all(tmp.join("dat")).unwrap();
+        fs::write(game.join("a.dll"), "original a").unwrap();
+        fs::write(game.join("dat/c.bin"), "original c").unwrap();
+        // Downloaded: a.dll (replaces), new.dll (added), c.bin is missing in
+        // tmp, so its move fails after the first two went in.
+        fs::write(tmp.join("a.dll"), "patched a").unwrap();
+        fs::write(tmp.join("new.dll"), "patched new").unwrap();
+        let paths = [changed("a.dll"), changed("new.dll"), changed("dat/c.bin")];
+        let server = "127.0.0.1:8080";
+        let mut manifest = Manifest::load(&game, server);
+        assert!(move_changed_paths(&paths, &tmp, &game, &mut manifest, server).is_err());
+        // Half-patched right now: a.dll new, new.dll added, a.dll.mezeb kept.
+        assert_eq!(fs::read_to_string(game.join("a.dll")).unwrap(), "patched a");
+        rollback_failed_move(&game, server);
+        assert_eq!(fs::read_to_string(game.join("a.dll")).unwrap(), "original a");
+        assert!(!game.join("new.dll").exists());
+        assert!(!game.join("a.dll.mezeb").exists());
+        assert!(!game.join("dat/c.bin.mezeb").exists());
+        assert_eq!(fs::read_to_string(game.join("dat/c.bin")).unwrap(), "original c");
+        assert!(!Manifest::path(&game, server).exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn successful_move_then_restore_round_trip() {
+        let root = scratch("roundtrip");
+        let game = root.join("game");
+        let tmp = game.join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(game.join("a.dll"), "original a").unwrap();
+        fs::write(tmp.join("a.dll"), "patched a").unwrap();
+        fs::write(tmp.join("new.dll"), "patched new").unwrap();
+        let server = "127.0.0.1:8080";
+        let mut manifest = Manifest::load(&game, server);
+        move_changed_paths(&[changed("a.dll"), changed("new.dll")], &tmp, &game, &mut manifest, server).unwrap();
+        assert_eq!(Manifest::load(&game, server).added_files, vec!["new.dll".to_string()]);
+        restore_server(&game, server).unwrap();
+        assert_eq!(fs::read_to_string(game.join("a.dll")).unwrap(), "original a");
+        assert!(!game.join("new.dll").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_walk_does_not_follow_symlinks() {
+        let root = scratch("symlink");
+        let game = root.join("game");
+        let outside = root.join("outside");
+        fs::create_dir_all(game.join("Mezeporta/WinePrefix/dosdevices")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("x.txt"), "outside").unwrap();
+        fs::write(outside.join("x.txt.mezeb"), "outside backup").unwrap();
+        std::os::unix::fs::symlink(&outside, game.join("Mezeporta/WinePrefix/dosdevices/z:")).unwrap();
+        fs::write(game.join("b.dll"), "patched b").unwrap();
+        fs::write(game.join("b.dll.mezeb"), "original b").unwrap();
+        restore_backup_files(&game).unwrap();
+        assert_eq!(fs::read_to_string(game.join("b.dll")).unwrap(), "original b");
+        assert_eq!(fs::read_to_string(outside.join("x.txt")).unwrap(), "outside");
+        assert!(outside.join("x.txt.mezeb").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
 }

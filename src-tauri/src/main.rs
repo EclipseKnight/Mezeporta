@@ -11,6 +11,8 @@ mod altclient_stats;
 mod cli;
 mod config;
 mod endpoint;
+mod hv_patch;
+mod hv_update;
 mod manifest;
 mod patcher;
 mod server;
@@ -2681,6 +2683,14 @@ struct TauriStateSync {
     cancel_launcher: CancellationToken,
     cancel_serverlist: CancellationToken,
     cancel_messagelist: CancellationToken,
+
+    // Hunsterverse (1.5.4-hv2): the last login's username and password (memory
+    // only, also without "remember me"), for the account API calls of the
+    // patch choice (hv_patch.rs), and that API's sign-in token.
+    hv_credentials: Option<(String, String)>,
+    hv_api_token: Option<String>,
+    // The last update manifest the launcher fetched (hv_update.rs).
+    hv_update_manifest: Option<hv_update::ReleaseManifest>,
 }
 
 impl TauriStateSync {
@@ -4295,6 +4305,8 @@ async fn auth(
         password.clone(),
     );
     state_sync.session_username = username.clone();
+    state_sync.hv_credentials = Some((username.clone(), password.clone()));
+    state_sync.hv_api_token = None;
     let um_snapshot = state_sync.user_manager.clone();
     state_sync
         .store
@@ -5105,6 +5117,184 @@ async fn patcher_swap_to_cached(
     patcher::swap_to_cached_server(&root, &target_server)
 }
 
+
+// --- Hunsterverse (1.5.4-hv2): patch choice and launcher self-update ---------
+
+/// The launcher binary's path, as it was at start-up (an update renames files
+/// around it later).
+fn launcher_exe() -> Option<&'static PathBuf> {
+    static EXE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    EXE.get_or_init(|| std::env::current_exe().ok()).as_ref()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HvPatchStatus {
+    /// The selected server is Hunsterverse (it has an account API).
+    supported: bool,
+    /// What the account has chosen (the API): "stable" or "pre:<slot>".
+    account_channel: String,
+    /// What the server gave at this login (its patchServer).
+    served_channel: String,
+    served_version: String,
+    /// What the launcher last installed for this server.
+    installed: Option<hv_patch::InstalledPatch>,
+    installed_up_to_date: bool,
+    /// The login found a patch the player has not installed yet.
+    update_pending: bool,
+    /// The API's answer (slots and their notes, eligible,
+    /// confirmationRequired, currentPatch, characters); null on error.
+    api: Value,
+    error: String,
+}
+
+async fn hv_api_token(
+    state: &tauri::State<'_, TauriState>,
+    api: &str,
+    fresh: bool,
+) -> Result<String, String> {
+    let (cached, creds) = {
+        let state_sync = state.state_sync.lock().await;
+        (state_sync.hv_api_token.clone(), state_sync.hv_credentials.clone())
+    };
+    if let (false, Some(token)) = (fresh, cached) {
+        return Ok(token);
+    }
+    let (username, password) = creds.ok_or("Log in first.")?;
+    let token = hv_patch::sign_in(&state.client, api, &username, &password)
+        .await
+        .map_err(|e| e.text())?;
+    state.state_sync.lock().await.hv_api_token = Some(token.clone());
+    Ok(token)
+}
+
+async fn hv_get_channel(state: &tauri::State<'_, TauriState>, api: &str) -> Result<Value, String> {
+    let token = hv_api_token(state, api, false).await?;
+    match hv_patch::get_channel(&state.client, api, &token).await {
+        Err(hv_patch::ApiError::Unauthorized) => {
+            let token = hv_api_token(state, api, true).await?;
+            hv_patch::get_channel(&state.client, api, &token)
+                .await
+                .map_err(|e| e.text())
+        }
+        other => other.map_err(|e| e.text()),
+    }
+}
+
+#[tauri::command]
+async fn hv_patch_status(state: tauri::State<'_, TauriState>) -> Result<HvPatchStatus, String> {
+    let (host, server_key, root, patch_server, update_pending) = {
+        let state_sync = state.state_sync.lock().await;
+        let auth = state_sync.auth_resp.as_ref().ok_or("Log in first.")?;
+        (
+            state_sync.current_endpoint.host(),
+            state_sync.current_endpoint.server_key(),
+            state_sync.effective_folder(),
+            auth.patch_server.clone(),
+            state_sync.patcher_resp.is_some(),
+        )
+    };
+    let served_channel = hv_patch::served_channel(&patch_server);
+    let installed = hv_patch::load_installed(&root, &server_key);
+    let active_server = fs::read_to_string(root.join("Mezeporta/active_server"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let installed_up_to_date = !update_pending
+        && active_server == server_key
+        && installed.as_ref().is_some_and(|i| {
+            i.channel == served_channel
+                && patcher::cached_server_etag(&root, &server_key).as_deref() == Some(i.etag.as_str())
+        });
+    let mut status = HvPatchStatus {
+        supported: false,
+        account_channel: String::new(),
+        served_channel,
+        served_version: String::new(),
+        installed,
+        installed_up_to_date,
+        update_pending,
+        api: Value::Null,
+        error: String::new(),
+    };
+    let Some(api) = hv_patch::account_api_for(&host) else {
+        return Ok(status);
+    };
+    status.supported = true;
+    match hv_get_channel(&state, &api).await {
+        Ok(answer) => {
+            status.account_channel = match answer["slot"].as_str().filter(|s| !s.is_empty()) {
+                Some(slot) => format!("pre:{slot}"),
+                None => "stable".to_string(),
+            };
+            status.served_version = hv_patch::version_for(&status.served_channel, &answer);
+            // Up to date: what is installed is what the server gives now, so it
+            // has the version the API names for it.
+            if status.installed_up_to_date && !status.served_version.is_empty() {
+                if let Some(record) = status.installed.as_mut() {
+                    if record.version != status.served_version {
+                        record.version = status.served_version.clone();
+                        hv_patch::save_installed(&root, &server_key, record);
+                    }
+                }
+            }
+            status.api = answer;
+        }
+        Err(e) => status.error = e,
+    }
+    Ok(status)
+}
+
+#[tauri::command]
+async fn hv_set_patch_channel(
+    state: tauri::State<'_, TauriState>,
+    channel: String,
+    confirm: bool,
+) -> Result<hv_patch::ChannelChange, String> {
+    if !hv_patch::valid_channel(&channel) {
+        return Err("Unknown patch choice.".into());
+    }
+    let host = state.state_sync.lock().await.current_endpoint.host();
+    let api = hv_patch::account_api_for(&host).ok_or("This server has no patch choice.")?;
+    let token = hv_api_token(&state, &api, false).await?;
+    match hv_patch::put_channel(&state.client, &api, &token, &channel, confirm).await {
+        Err(hv_patch::ApiError::Unauthorized) => {
+            let token = hv_api_token(&state, &api, true).await?;
+            hv_patch::put_channel(&state.client, &api, &token, &channel, confirm)
+                .await
+                .map_err(|e| e.text())
+        }
+        other => other.map_err(|e| e.text()),
+    }
+}
+
+#[tauri::command]
+async fn hv_check_launcher_update(
+    state: tauri::State<'_, TauriState>,
+) -> Result<hv_update::UpdateInfo, String> {
+    let manifest = hv_update::fetch_manifest(&state.client).await?;
+    let info = hv_update::update_info(&manifest);
+    state.state_sync.lock().await.hv_update_manifest = Some(manifest);
+    Ok(info)
+}
+
+/// Downloads, checks and installs the update, then restarts into it. Returns
+/// only on failure (the launcher keeps running the old version).
+#[tauri::command]
+async fn hv_install_launcher_update(state: tauri::State<'_, TauriState>) -> Result<(), String> {
+    let exe = launcher_exe().ok_or("Cannot find the launcher's own file.")?;
+    let manifest = match state.state_sync.lock().await.hv_update_manifest.clone() {
+        Some(m) => m,
+        None => hv_update::fetch_manifest(&state.client).await?,
+    };
+    hv_update::download_and_install(&state.client, &manifest, exe, hv_update::PUBLIC_KEY).await?;
+    {
+        let mut state_sync = state.state_sync.lock().await;
+        cancel_all_requests(&mut state_sync);
+    }
+    hv_update::restart(exe)
+}
+
 fn cancel_all_requests(state_sync: &mut TauriStateSync) {
     state_sync.cancel_shared.cancel();
     state_sync.cancel_launcher.cancel();
@@ -5264,6 +5454,13 @@ fn main() {
     // GUI mode: detach console so cmd doesn't hang and the launcher is clean.
     #[cfg(windows)]
     detach_console_for_gui();
+
+    // Hunsterverse (1.5.4-hv2): after a self-update, let the old process exit
+    // first (Windows), then remove the old binary it left (hv_update.rs).
+    hv_update::wait_for_previous_process();
+    if let Some(exe) = launcher_exe() {
+        hv_update::cleanup_after_update(exe);
+    }
 
     let _single_instance_guard = acquire_single_instance_mutex();
     // Log plugin has an issue where it cannot be initialized twice.
@@ -5492,7 +5689,11 @@ fn main() {
                     patcher_stop,
                     patcher::reset_game_files,
                     patcher_swap_info,
-                    patcher_swap_to_cached
+                    patcher_swap_to_cached,
+                    hv_patch_status,
+                    hv_set_patch_channel,
+                    hv_check_launcher_update,
+                    hv_install_launcher_update
                 ])
                 .build(tauri::generate_context!())
             {
