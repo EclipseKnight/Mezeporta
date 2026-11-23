@@ -9,11 +9,14 @@ this folder, `src-tauri/src/hv_*.rs` and `src/components/HunsterversePanel.vue`.
 |---|---|
 | 1.5.4-hv1 (2026-11-05) | Patch downloads fail after 60 s without data instead of 10 s per file (`patcher.rs`, `server.rs`, `main.rs`) |
 | 1.5.4-hv2 (2026-11-23) | Client patch choice, launcher self-update, safer patching (below) |
+| 1.5.4-hv3 (2026-11-23) | The Patch button moved off the CAPCOM logo (classic: in the footer after "Online Players"; PS4 style: right of Settings), part of the launcher layout so it scales with the window; the header's "release ver." comes from `tauri.conf.json` (hv2 still said hv1) |
 
 ## Client patch choice (hv2)
 
-What a player sees: after logging in to Hunsterverse, a **Patch** button at
-the bottom left of the character page ("Patch: Stable v1.30"). It opens a
+What a player sees: after logging in to Hunsterverse, a **Patch** button on
+the character page ("Patch: Stable v1.30"; since hv3 in the classic footer
+after "Online Players", in the PS4 style right of Settings:
+`HunsterversePatchButton.vue`). It opens a
 panel with
 
 - **Installed**: what this launcher last put in the game folder, and whether
@@ -166,10 +169,13 @@ launcher updates; launchers already updated stay on it until a newer release.
   and the patcher: a move that fails half-way is rolled back, a move then
   restore round trip, and the restore walk not following symlinks. (The
   `--target` matters: `.cargo/config.toml` defaults to Windows i686.)
-- `hunsterverse/test-e2e.sh NEW_BIN NEXT_BIN`: the real Linux launcher under
+- `hunsterverse/test-e2e.sh NEW_BIN NEXT_BIN` (env `NEXT_VERSION`, `NEW_VERSION`,
+  `SCENARIOS`, `SHOTS`: see the script's header): the real Linux launcher under
   Xvfb, driven through tauri-driver, against local stand-ins of the wrapper,
   Erupe's pre-release routes, the account API and the release (no real
   server, account or game data): first login installs stable; the panel
   shows installed/served; pre-release with the confirmation, then back to
-  Stable, with the game folder checked after each; a tampered update refused,
-  the signed one installed and restarted in place.
+  Stable, with the game folder checked after each; the Patch button inside
+  the launcher layout covering nothing at the default and a small window size
+  (screenshots with `SHOTS`); a tampered update refused, the signed one
+  installed and restarted in place.

@@ -13,6 +13,11 @@
 #           for the update test. It is signed here with the real release key
 #           (TAURI_PRIVATE_KEY_PATH / HV_KEY_PASSWORD_FILE, as build-release.sh),
 #           since NEW_BIN only accepts that key.
+# Env: NEXT_VERSION  NEXT_BIN's version (default 1.5.4-hv3);
+#      NEW_VERSION   NEW_BIN's version: if set, the header must show it;
+#      SCENARIOS     default "patch update" (e.g. "update" for an old NEW_BIN);
+#      SHOTS         folder for screenshots of the character page;
+#      STYLE         launcher look: 1 classic (default), 3 PS4.
 #
 # Needs: Xvfb, WebKitWebDriver (apt webkit2gtk-driver), tauri-driver
 # (cargo install tauri-driver --locked), python3, npx (tauri signer).
@@ -25,12 +30,17 @@
 #   update: a tampered download is refused with the file unchanged; the
 #           signed one replaces the binary and the launcher restarts into it
 #           in place (same PID).
+#   layout: the Patch button is part of the launcher layout and covers
+#           nothing, at the default window size and a small one.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 NEW_BIN="$(realpath "$1")"
 NEXT_BIN="$(realpath "$2")"
 KEY="${TAURI_PRIVATE_KEY_PATH:-$HOME/.secrets/mezeporta-updater.key}"
 KEY_PASSWORD_FILE="${HV_KEY_PASSWORD_FILE:-$HOME/.secrets/mezeporta-updater.key.password}"
+NEXT_VERSION="${NEXT_VERSION:-1.5.4-hv3}" SCENARIOS="${SCENARIOS:-patch update}"
+export NEXT_VERSION
+[[ -z "${SHOTS:-}" ]] || { mkdir -p "$SHOTS"; export SHOTS="$(realpath "$SHOTS")"; }
 GP=${GP:-18480} AP=${AP:-18481} RP=${RP:-18482} DISPLAY_NUM=${DISPLAY_NUM:-97}
 export PATH="$HOME/.cargo/bin:$PATH"
 
@@ -77,13 +87,14 @@ cp "$NEW_BIN" "$GAME/mezeporta-bin"
 printf 'original mhfo-hd\n' > "$GAME/mhfo-hd.dll"
 printf 'original a.pac\n' > "$GAME/dat/a.pac"
 echo keep > "$GAME/other.txt"
-python3 -I - "$GAME/Mezeporta/config.json" "$GP" <<'EOF'
+python3 -I - "$GAME/Mezeporta/config.json" "$GP" "${STYLE:-1}" <<'EOF'
 import json, sys
 ep = {"url": "127.0.0.1", "name": "Hunsterverse", "launcherPort": int(sys.argv[2]), "gamePort": 53310,
       "version": "ZZ", "isRemote": False, "serverMode": "api", "gameFolder": None}
 cfg = {"endpoints": [ep], "current_endpoint": dict(ep),
        "launcher_prefs": {"preloadControllerDlls": False, "friendSignature": "none",
-                          "winePrefixMode": "system", "winePrefixCustomPath": None, "serverMode": "api"}}
+                          "winePrefixMode": "system", "winePrefixCustomPath": None, "serverMode": "api"},
+       "style": int(sys.argv[3])}
 json.dump(cfg, open(sys.argv[1], "w"), indent=2)
 EOF
 
@@ -104,19 +115,23 @@ grep -q listening "$WORK/servers.out" || { cat "$WORK/servers.out" >&2; echo "fa
 PIDS+=($!)
 sleep 2
 
+if [[ " $SCENARIOS " == *" patch "* ]]; then
 echo "== patch choice"
 python3 -I "$HERE/e2e/drive.py" patch "$GAME" "$STATE" || { tail -n 40 "$WORK/driver.out" >&2; exit 1; }
 grep -q " PUT /api/account/patch-channel 409" "$STATE/requests.log" || { echo "FAIL no 409 confirmation round" >&2; exit 1; }
 [[ $(grep -c " PUT /api/account/patch-channel 200" "$STATE/requests.log") == 2 ]] || { echo "FAIL expected 2 saved choices" >&2; exit 1; }
 grep -q " GET /prerelease/mods/hvmods.dll 200" "$STATE/requests.log" || { echo "FAIL the pre-release file was not downloaded from its slot" >&2; exit 1; }
 echo "ok   API log: 409 confirmation, 2 saved choices; pre-release files came from /prerelease/mods"
+fi
 
+if [[ " $SCENARIOS " == *" update "* ]]; then
 echo "== launcher self-update"
 cp "$NEXT_BIN" "$STATE/release/mezeporta-bin"
 "$HERE/sign-file.sh" "$STATE/release/mezeporta-bin" "$KEY" "$KEY_PASSWORD_FILE"
 printf 'Test release for the e2e test.\n' > "$WORK/notes.txt"
-python3 -I "$HERE/make_latest_json.py" 1.5.4-hv3 "$WORK/notes.txt" "http://127.0.0.1:$RP" "$STATE/release" > "$STATE/release/latest.json"
+python3 -I "$HERE/make_latest_json.py" "$NEXT_VERSION" "$WORK/notes.txt" "http://127.0.0.1:$RP" "$STATE/release" > "$STATE/release/latest.json"
 python3 -I "$HERE/e2e/drive.py" update "$GAME" "$STATE" || { tail -n 40 "$WORK/driver.out" >&2; exit 1; }
 [[ $(grep -c "^$RP GET /latest.json 200" "$STATE/requests.log") -ge 2 ]] || { echo "FAIL the restarted launcher did not check for updates again" >&2; exit 1; }
-echo "ok   the restarted launcher checked latest.json again (now up to date)"
+echo "ok   the restarted launcher checked latest.json again"
+fi
 echo "all e2e checks passed"

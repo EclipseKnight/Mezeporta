@@ -84,6 +84,10 @@ import { getAltCharacterSavedataView, clearAltSavedataPanelCache } from "../altc
 import { useLauncherGamepad } from "../useLauncherGamepad";
 
 import { playHover, playConfirm, playStart, playSelect, bindSfx } from "../sfx";
+// Hunsterverse (1.5.4-hv3): the Patch button sits in the footer after the
+// status text, and the header shows the launcher's own version (vite.config.js).
+import HunsterversePatchButton from "../components/HunsterversePatchButton.vue";
+const hvAppVersion = __HV_APP_VERSION__;
 
 const launcherRoot = ref(null);
 const settingsBtn = ref(null);
@@ -1874,7 +1878,7 @@ watch(
           <img draggable="false" :key="launcherHeaderUrl" :src="launcherHeaderUrl" @error="e => (e.target.src = fallbackLauncherHeader)"/>
           <div class="absolute">
             <div class="relative bottom-[45px] left-[350px] text-[#dcdcdc]">
-              release ver. 1.5.4-hv1
+              release ver. {{ hvAppVersion }}
             </div>
           </div>
           <div
@@ -2182,6 +2186,7 @@ watch(
             {{ footerStatusLabel }}
           </div>
         </transition>
+        <HunsterversePatchButton v-if="storeMut.page !== SETTINGS_PAGE" variant="classic" />
       </div>
       <div class="grow"></div>
       <div v-if="canShowServerInfo && storeMut.page !== SETTINGS_PAGE" class="classic-footer-panels relative flex items-center gap-1">

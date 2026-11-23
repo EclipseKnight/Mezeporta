@@ -1,0 +1,2 @@
+The Patch button moved next to "Online Players" so it no longer covers the CAPCOM logo.
+The header shows the launcher's real version again.

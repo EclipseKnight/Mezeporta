@@ -7,17 +7,19 @@
     signature, swaps it in and restarts. "Later" hides the bar until the next start.
 
   - Client patch: on the character page of a Hunsterverse login, a button shows the
-    installed patch; it opens a panel with what is installed, what the server gives
-    this account, and the choice Stable / each published pre-release. The choice is
+    installed patch (drawn by each launcher layout: HunsterversePatchButton.vue);
+    it opens a panel with what is installed, what the server gives this account,
+    and the choice Stable / each published pre-release. The choice is
     the account setting the website's Account page edits (same API, src-tauri/src/
     hv_patch.rs); after a change the launcher logs in again, so the normal patch
     dialog downloads the chosen patch (or puts the stable one back).
 -->
 <script setup>
-import { ref, computed, watch, onMounted } from "vue";
+import { ref, computed, watch, watchEffect, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api";
 import { storeMut, doLogin } from "../store";
 import { CHARACTERS_PAGE } from "../common";
+import { hvPatchButton } from "./hvPatchButton";
 
 // --- launcher update -------------------------------------------------------
 const update = ref(null); // UpdateInfo when one is available
@@ -142,6 +144,14 @@ function openPanel() {
   loadStatus();
 }
 
+// Hunsterverse (1.5.4-hv3): the button itself is part of each launcher layout.
+hvPatchButton.open = openPanel;
+watchEffect(() => {
+  hvPatchButton.visible = Boolean(showChip.value) && !panelOpen.value;
+  hvPatchButton.text = chipText.value;
+  hvPatchButton.title = servedText.value;
+});
+
 function closePanel() {
   if (saving.value) return;
   panelOpen.value = false;
@@ -201,10 +211,6 @@ function isChosen(channel) {
         <button class="hv-btn" :disabled="updateBusy" @click="updateHidden = true">Later</button>
       </div>
     </div>
-
-    <button v-if="showChip && !panelOpen" class="hv-chip" :title="servedText" @click="openPanel">
-      {{ chipText }}
-    </button>
 
     <div v-if="panelOpen" class="hv-backdrop" @click.self="closePanel">
       <div class="hv-panel" role="dialog" aria-label="Client patch">
@@ -293,7 +299,6 @@ function isChosen(channel) {
   color: #f3ead7;
 }
 .hv-update-bar,
-.hv-chip,
 .hv-backdrop {
   pointer-events: auto;
 }
@@ -315,18 +320,6 @@ function isChosen(channel) {
 }
 .hv-update-text {
   flex: 1;
-}
-.hv-chip {
-  position: absolute;
-  left: 10px;
-  bottom: 10px;
-  padding: 5px 10px;
-  font-size: 12px;
-  background: rgba(30, 22, 14, 0.85);
-  color: #f3ead7;
-  border: 1px solid #b8955a;
-  border-radius: 4px;
-  cursor: pointer;
 }
 .hv-backdrop {
   position: absolute;

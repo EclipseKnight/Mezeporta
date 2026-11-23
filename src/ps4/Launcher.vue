@@ -87,6 +87,8 @@ import { getAltCharacterSavedataView, clearAltSavedataPanelCache } from "../altc
 import { useLauncherGamepad } from "../useLauncherGamepad";
 
 import { playHover, playConfirm, playSelect, bindSfx } from "../sfx";
+// Hunsterverse (1.5.4-hv3): the Patch button sits right of the Settings button.
+import HunsterversePatchButton from "../components/HunsterversePatchButton.vue";
 
 const launcherRoot = ref(null);
 const settingsBtn = ref(null);
@@ -101,7 +103,8 @@ const mailOverlayRef = ref(null);
 const distributionOverlayRef = ref(null);
 const friendsOverlayRef = ref(null);
 const serverDialogNameDownNode = ref("server-dialog-host");
-const ps4VersionLabel = "release ver. 1.5.4-hv1";
+// Hunsterverse (1.5.4-hv3): the launcher's own version (vite.config.js).
+const ps4VersionLabel = `release ver. ${__HV_APP_VERSION__}`;
 const ps4LauncherTitle = computed(() => {
   const version = String(store.settings?.gameVersion ?? "").trim().toUpperCase();
   if (version === "S6" || version === "S7K" || version === "F4" || version === "F5") {
@@ -2273,6 +2276,7 @@ watch(
             @click="onSettingsClick()"
             title="Settings"
           ></button>
+          <HunsterversePatchButton v-if="storeMut.page !== SETTINGS_PAGE" variant="ps4" />
           <div class="grow"></div>
           <div v-if="canShowServerInfo" ref="serverInfoPanelRoot" class="ps4-footer-panels relative flex items-center gap-[12px]">
         <div ref="eventPanelRoot" class="relative flex items-center gap-[8px]">

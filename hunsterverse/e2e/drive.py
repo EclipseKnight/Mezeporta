@@ -11,7 +11,13 @@ SCENARIO:
   update   the update bar: a tampered download is refused, then the signed one
            is installed and the launcher restarts into it
 Prints "ok ..." per check; exits 1 at the first failure.
+
+Env: NEXT_VERSION  the version the update offers (default 1.5.4-hv3);
+     NEW_VERSION   if set, the header must read "release ver. NEW_VERSION";
+     SHOTS         if set, a folder for screenshots of the character page
+                   (default window size and a small one).
 """
+import base64
 import hashlib
 import http.client
 import json
@@ -21,6 +27,7 @@ import time
 import urllib.request
 
 DRIVER = "http://127.0.0.1:4444"
+NEXT_VERSION = os.environ.get("NEXT_VERSION", "1.5.4-hv3")
 ELEMENT = "element-6066-11e4-a52e-4f735466cecc"
 
 
@@ -77,6 +84,13 @@ class Session:
                 return last
             time.sleep(0.5)
         fail("timed out waiting for %s (last: %r)" % (what, last))
+
+    def screenshot(self, path):
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(call("GET", "/session/%s/screenshot" % self.id)))
+
+    def set_size(self, width, height):
+        call("POST", "/session/%s/window/rect" % self.id, {"width": width, "height": height})
 
     def close(self):
         try:
@@ -137,6 +151,73 @@ def chip(s, expect, what):
     ok("character page, patch button says '%s'" % text)
 
 
+# The Patch button must be part of the launcher's own layout (so it scales with
+# it) and must not cover anything shown there, such as the footer's CAPCOM logo.
+CHIP_PLACE = """
+const chip = document.querySelector('.hv-chip');
+if (!chip) return 'no patch button';
+const shown = (e) => {
+  for (let n = e; n && n !== document.documentElement; n = n.parentElement) {
+    const st = getComputedStyle(n);
+    if (st.display === 'none' || st.visibility === 'hidden' || parseFloat(st.opacity) === 0) return false;
+  }
+  return true;
+};
+const r = chip.getBoundingClientRect();
+const hit = (b) => r.left < b.right - 1 && b.left < r.right - 1 && r.top < b.bottom - 1 && b.top < r.bottom - 1;
+const bad = [];
+const content = document.querySelector('.launcher-content');
+for (const e of content.querySelectorAll('img, button, a, input, [class*="footer-status"], [class*="footer-tag"]')) {
+  if (e === chip || e.contains(chip) || chip.contains(e) || !shown(e)) continue;
+  const b = e.getBoundingClientRect();
+  if (b.width && b.height && hit(b)) {
+    const what = e.tagName === 'IMG' ? (e.getAttribute('src') || '').split('/').pop() : e.textContent.trim().slice(0, 30);
+    bad.push(e.tagName.toLowerCase() + ' ' + what);
+  }
+}
+if (bad.length) return 'covers: ' + bad.join(', ');
+if (!content.contains(chip)) return 'not part of the launcher layout';
+if (r.left < 0 || r.top < 0 || r.right > innerWidth || r.bottom > innerHeight) return 'outside the window';
+return 'ok';
+"""
+
+HEADER_VERSION = """
+for (const e of document.querySelectorAll('.launcher-content *')) {
+  if (e.children.length === 0 && e.textContent.trim().startsWith('release ver.')) return e.textContent.trim();
+}
+return null;
+"""
+
+
+def check_layout(s):
+    """Patch button placement (and header version) at the default size and a small one."""
+    shots = os.environ.get("SHOTS")
+    time.sleep(2)  # let the footer's fade and the character card's fade-in finish
+    size = s.js("return [window.innerWidth, window.innerHeight];")
+    for label, (w, h) in (("default", size), ("small", (562, 300))):
+        if label == "small":
+            try:
+                s.set_size(w, h)
+            except RuntimeError as e:
+                fail("could not resize the window: %s" % e)
+            time.sleep(1.5)
+            w, h = s.js("return [window.innerWidth, window.innerHeight];")
+        if shots:
+            s.screenshot(os.path.join(shots, "character-page-%s-%dx%d.png" % (label, w, h)))
+        where = s.js(CHIP_PLACE)
+        if where != "ok":
+            fail("patch button at %dx%d: %s" % (w, h, where))
+        ok("patch button at %dx%d: inside the launcher layout, covers nothing" % (w, h))
+    s.set_size(*size)
+    time.sleep(1.5)
+    want = os.environ.get("NEW_VERSION")
+    if want:
+        got = s.js(HEADER_VERSION)
+        if got != "release ver. " + want:
+            fail("header says %r, expected 'release ver. %s'" % (got, want))
+        ok("header says '%s'" % got)
+
+
 def files_are(game, folder, extra_absent=()):
     for dirpath, _d, names in os.walk(folder):
         for n in names:
@@ -171,6 +252,7 @@ def scenario_patch(game, state):
         login(s)
         install_patch_dialog(s, "first login, stable")
         chip(s, "Patch: Stable v1.30", "after the stable patch")
+        check_layout(s)
         files_are(game, os.path.join(state, "stable"))
         ok("game folder holds the stable patch, other files untouched")
 
@@ -241,9 +323,9 @@ def scenario_update(game, state):
         s.wait("const e = document.querySelector('.hv-update-bar'); return e ? e.textContent : null;",
                "the update bar", 60)
         text = s.js(TEXT_OF, ".hv-update-bar strong")
-        if text != "Launcher update 1.5.4-hv3":
+        if text != "Launcher update " + NEXT_VERSION:
             fail("update bar says %r" % text)
-        ok("update bar offers 1.5.4-hv3 (running 1.5.4-hv2)")
+        ok("update bar offers %s, %s" % (NEXT_VERSION, s.js(TEXT_OF, ".hv-update-bar span").strip("() ")))
         pids = launcher_pids(exe)
         if len(pids) != 1:
             fail("expected one launcher process, found %s" % pids)
@@ -261,7 +343,7 @@ def scenario_update(game, state):
             time.sleep(0.5)
         if not same(exe, good):
             fail("the launcher file was not replaced")
-        ok("signed update installed: the launcher file is now the hv3 build")
+        ok("signed update installed: the launcher file is now the %s build" % NEXT_VERSION)
         # The new binary removes <exe>.old at start-up: proof that it runs.
         end = time.time() + 60
         while time.time() < end and os.path.exists(exe + ".old"):
