@@ -23,7 +23,10 @@
 # (cargo install tauri-driver --locked), python3, npx (tauri signer).
 # Checks:
 #   patch:  first login installs the stable patch; the Patch panel shows
-#           installed/served versions; choosing the pre-release asks for the
+#           installed/served versions and, with a pre-release out, the link to
+#           the full pre-release notes on the website (screenshot of the open
+#           panel with SHOTS; clicking it opens that URL through a stand-in
+#           xdg-open, no real browser); choosing the pre-release asks for the
 #           API's confirmation, then the launcher logs in again and installs
 #           it; choosing Stable puts the stable files back and removes the
 #           added file; the account API holds each choice.
@@ -124,6 +127,13 @@ EOF
 } > "$WORK/proton/proton"
 chmod +x "$WORK/proton/proton"
 
+# Stand-in browser: the launcher opens links with xdg-open (Tauri's shell open,
+# the `open` crate tries it first). It only records the URL, so no real browser
+# starts during the test.
+mkdir -p "$WORK/browser"
+printf '#!/bin/sh\necho "$1" >> %q\n' "$STATE/browser-calls.log" > "$WORK/browser/xdg-open"
+chmod +x "$WORK/browser/xdg-open"
+
 python3 -I "$HERE/e2e/fake_servers.py" "$STATE" "$GP" "$AP" "$RP" > "$WORK/servers.out" 2>&1 &
 PIDS+=($!)
 Xvfb ":$DISPLAY_NUM" -screen 0 1280x800x24 -nolisten tcp > "$WORK/xvfb.out" 2>&1 &
@@ -139,6 +149,7 @@ grep -q listening "$WORK/servers.out" || { cat "$WORK/servers.out" >&2; echo "fa
   # Steam Deck set-up as install-hunsterverse.sh writes it, and no Wine.
   export MEZEPORTA_PROTON_CMD="$WORK/proton/proton" STEAM_COMPAT_DATA_PATH="$STATE/compat"
   export MEZEPORTA_WINE_CMD="$WORK/no-wine/wine"
+  export PATH="$WORK/browser:$PATH"
   exec tauri-driver --port 4444
 ) > "$WORK/driver.out" 2>&1 &
 PIDS+=($!)

@@ -5,9 +5,10 @@ test-e2e.sh. Standard library only.
 drive.py SCENARIO GAME_DIR STATE_DIR [SHOTS_DIR]
 
 SCENARIO:
-  patch    log in, install the stable patch, switch to the pre-release "mods"
-           (with the one-time confirmation), then back to Stable, checking the
-           game folder after each step
+  patch    log in, install the stable patch, check the panel's link to the
+           full pre-release notes (clicked through a stand-in xdg-open), switch
+           to the pre-release "mods" (with the one-time confirmation), then back
+           to Stable, checking the game folder after each step
   events   the event badges come from the account API's events/current and
            festa answers (STATE_DIR/events-current.json, festa.json); with
            that API down, from the game server's flags (Hunter Festa only);
@@ -26,7 +27,8 @@ Prints "ok ..." per check; exits 1 at the first failure.
 Env: NEXT_VERSION  the version the update offers (default 1.5.4-hv3);
      NEW_VERSION   if set, the header must read "release ver. NEW_VERSION";
      SHOTS         if set, a folder for screenshots of the character page
-                   (default window size and a small one) and of the Wine
+                   (default window size and a small one), of the open Patch
+                   panel with the notes link, and of the Wine
                    Prefix setting (proton).
 """
 import base64
@@ -258,6 +260,44 @@ def open_panel(s):
     s.wait("return !!document.querySelector('.hv-panel .hv-choices')", "the patch panel's choices", 30)
 
 
+NOTES_URL = "https://frontier.hunsterverse.net/account.html#client-patch"
+NOTES_LINK = """
+for (const a of document.querySelectorAll('.hv-panel a'))
+  if (a.textContent.trim() === 'Full pre-release notes on the website' && a.offsetWidth && a.offsetHeight) return true;
+return false;
+"""
+
+
+def notes_link(s, state):
+    """With a pre-release slot out, the open panel links to the full notes on
+    the website. The click goes to the stand-in xdg-open (test-e2e.sh), which
+    records the URL instead of starting a browser."""
+    s.wait(NOTES_LINK, "the pre-release notes link in the panel", 10)
+    ok("panel: 'Full pre-release notes on the website' link shown (pre-release mods is out)")
+    shots = os.environ.get("SHOTS")
+    if shots:
+        path = os.path.join(shots, "patch-panel-notes-link.png")
+        s.screenshot(path)
+        ok("screenshot " + path)
+    s.wait(CLICK_TEXT, "a click on the notes link", 10, ".hv-panel a", "Full pre-release notes")
+    log = os.path.join(state, "browser-calls.log")
+    end = time.time() + 15
+    while time.time() < end and not os.path.exists(log):
+        time.sleep(0.3)
+    if not os.path.exists(log):
+        fail("clicking the notes link opened nothing (no xdg-open call)")
+    with open(log) as f:
+        urls = f.read().split()
+    if urls != [NOTES_URL]:
+        fail("the notes link opened %r, expected %s" % (urls, NOTES_URL))
+    err = s.js(TEXT_OF, ".hv-panel .hv-error")
+    if err:
+        fail("panel shows an error after the click: %r" % err)
+    if not s.js("return !!document.querySelector('.hv-panel .hv-choices')"):
+        fail("the panel closed or lost its choices after the click")
+    ok("notes link opens %s in the browser; panel still open, no error" % NOTES_URL)
+
+
 def scenario_patch(game, state):
     s = Session(os.path.join(game, "mezeporta-bin"))
     try:
@@ -273,6 +313,7 @@ def scenario_patch(game, state):
         if "Stable v1.30" not in facts or "up to date" not in facts:
             fail("panel facts: %r" % facts)
         ok("panel: installed and served = Stable v1.30, up to date")
+        notes_link(s, state)
         s.wait(CLICK_TEXT, "the mods choice", 10, ".hv-panel .hv-choices button", "Pre-release mods")
         s.wait("return !!document.querySelector('.hv-confirm')", "the pre-release explanation", 20)
         if read_channel(state) != "stable":

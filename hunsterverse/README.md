@@ -23,7 +23,11 @@ panel with
   it is up to date;
 - **Server gives you**: the patch the game server answered at this login;
 - **Choose**: Stable, and one button per published pre-release slot (with
-  its version and "what you are testing" notes).
+  its version and "what you are testing" notes);
+- while a pre-release is out (hv3): "Full pre-release notes on the website",
+  which opens the Client patch tab of the website's Account page
+  (`https://frontier.hunsterverse.net/account.html#client-patch`) in the
+  browser.
 
 One source of truth: the account's `users.patch_channel`, the setting the
 website's Account page edits. The launcher signs in to the same REST API
@@ -224,7 +228,8 @@ launcher updates; launchers already updated stay on it until a newer release.
   Xvfb, driven through tauri-driver, against local stand-ins of the wrapper,
   Erupe's pre-release routes, the account API and the release (no real
   server, account or game data): first login installs stable; the panel
-  shows installed/served; pre-release with the confirmation, then back to
+  shows installed/served and the pre-release notes link (clicked through a
+  stand-in `xdg-open` that records the URL; screenshot with `SHOTS`); pre-release with the confirmation, then back to
   Stable, with the game folder checked after each; the Patch button inside
   the launcher layout covering nothing at the default and a small window size
   (screenshots with `SHOTS`); the event badges from a stand-in events API
