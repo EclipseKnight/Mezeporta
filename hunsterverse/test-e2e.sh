@@ -7,13 +7,13 @@
 #
 #   hunsterverse/test-e2e.sh NEW_BIN NEXT_BIN
 #
-# NEW_BIN:  this version's Linux launcher (e.g. 1.5.4-hv2, built by build-release.sh or
+# NEW_BIN:  this version's Linux launcher (e.g. 1.5.4-hv4, built by build-release.sh or
 #           `npx tauri build -b none --target x86_64-unknown-linux-gnu --config src-tauri/tauri.linux.conf.json`)
-# NEXT_BIN: the same source built with a higher version (e.g. 1.5.4-hv3), the "new release"
+# NEXT_BIN: the same source built with a higher version (e.g. 1.5.4-hv5), the "new release"
 #           for the update test. It is signed here with the real release key
 #           (TAURI_PRIVATE_KEY_PATH / HV_KEY_PASSWORD_FILE, as build-release.sh),
 #           since NEW_BIN only accepts that key.
-# Env: NEXT_VERSION  NEXT_BIN's version (default 1.5.4-hv3);
+# Env: NEXT_VERSION  NEXT_BIN's version (default 1.5.4-hv5);
 #      NEW_VERSION   NEW_BIN's version: if set, the header must show it;
 #      SCENARIOS     default "patch events proton update" (e.g. "update" for an old NEW_BIN);
 #      SHOTS         folder for screenshots of the character page;
@@ -29,7 +29,10 @@
 #           xdg-open, no real browser); choosing the pre-release asks for the
 #           API's confirmation, then the launcher logs in again and installs
 #           it; choosing Stable puts the stable files back and removes the
-#           added file; the account API holds each choice.
+#           added file; the account API holds each choice. Then the
+#           pre-release again (hv4 patch cache): switching to Stable and back
+#           downloads no file (counted in the fake server's request log), the
+#           game folder checked after each switch.
 #   events: the event badges come from the account API's events answers
 #           (e2e/events-current.json, festa.json; made-up quests), and from the
 #           game server's flags while that API is down. Screenshots go to
@@ -50,7 +53,7 @@ NEW_BIN="$(realpath "$1")"
 NEXT_BIN="$(realpath "$2")"
 KEY="${TAURI_PRIVATE_KEY_PATH:-$HOME/.secrets/mezeporta-updater.key}"
 KEY_PASSWORD_FILE="${HV_KEY_PASSWORD_FILE:-$HOME/.secrets/mezeporta-updater.key.password}"
-NEXT_VERSION="${NEXT_VERSION:-1.5.4-hv3}" SCENARIOS="${SCENARIOS:-patch events proton update}"
+NEXT_VERSION="${NEXT_VERSION:-1.5.4-hv5}" SCENARIOS="${SCENARIOS:-patch events proton update}"
 export NEXT_VERSION
 [[ -z "${SHOTS:-}" ]] || { mkdir -p "$SHOTS"; export SHOTS="$(realpath "$SHOTS")"; }
 GP=${GP:-18480} AP=${AP:-18481} RP=${RP:-18482} DISPLAY_NUM=${DISPLAY_NUM:-97}
@@ -159,9 +162,9 @@ if [[ " $SCENARIOS " == *" patch "* ]]; then
 echo "== patch choice"
 python3 -I "$HERE/e2e/drive.py" patch "$GAME" "$STATE" || { tail -n 40 "$WORK/driver.out" >&2; exit 1; }
 grep -q " PUT /api/account/patch-channel 409" "$STATE/requests.log" || { echo "FAIL no 409 confirmation round" >&2; exit 1; }
-[[ $(grep -c " PUT /api/account/patch-channel 200" "$STATE/requests.log") == 2 ]] || { echo "FAIL expected 2 saved choices" >&2; exit 1; }
+[[ $(grep -c " PUT /api/account/patch-channel 200" "$STATE/requests.log") == 3 ]] || { echo "FAIL expected 3 saved choices" >&2; exit 1; }
 grep -q " GET /prerelease/mods/hvmods.dll 200" "$STATE/requests.log" || { echo "FAIL the pre-release file was not downloaded from its slot" >&2; exit 1; }
-echo "ok   API log: 409 confirmation, 2 saved choices; pre-release files came from /prerelease/mods"
+echo "ok   API log: 409 confirmation, 3 saved choices; pre-release files came from /prerelease/mods"
 fi
 
 if [[ " $SCENARIOS " == *" events "* ]]; then

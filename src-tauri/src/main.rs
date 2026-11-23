@@ -14,6 +14,7 @@ mod endpoint;
 mod hv_dpi;
 mod hv_events;
 mod hv_patch;
+mod hv_patch_cache;
 mod hv_proton;
 mod hv_update;
 mod manifest;

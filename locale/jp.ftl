@@ -185,7 +185,7 @@ username-password-empty-error = ユーザー名とパスワードを入力して
 
 reset-patch-label = メンテナンス
 reset-button-label = パッチ済みファイルをリセット
-reset-patch-confirmation = このゲームフォルダーのパッチ済みファイルをすべて元に戻しますか？
+reset-patch-confirmation = このゲームフォルダーのパッチ済みファイルをすべて元に戻しますか？保存済みのパッチダウンロードも削除されます。
 reset-patch-success-confirmation = パッチ済みファイルを正常にリセットしました。
 resetting-label = リセット中...
 server-switch-label = サーバーファイル切替
@@ -335,7 +335,7 @@ settings-info-wine-prefix-proton-body = Steam に非 Steam ゲームとして追
 settings-info-wine-prefix-custom-body = 選択した Wine プレフィックスフォルダーを使用します。
 settings-info-wine-prefix-custom-path-body = カスタムプレフィックス選択時に使用するフォルダーです。
 settings-info-wine-prefix-custom-browse-body = 既存の Wine プレフィックスフォルダーを参照します。
-settings-info-reset-patch-body = アクティブサーバーのパッチ済みファイルを元のゲーム状態に戻します。
+settings-info-reset-patch-body = アクティブサーバーのパッチ済みファイルを元のゲーム状態に戻し、保存済みのパッチダウンロード（安定版とプレリリースの切り替え時に再ダウンロードしないためのもの）も削除します。
 settings-session-lock-tooltip = 調整するにはログアウトしてください
 controller-vibration-label = 振動
 settings-audio-title = オーディオ

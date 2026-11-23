@@ -185,7 +185,7 @@ username-password-empty-error = Username and password must not be empty
 
 reset-patch-label = Maintenance
 reset-button-label = Reset patched files
-reset-patch-confirmation = Restore all patched files back to original for this game folder?
+reset-patch-confirmation = Restore all patched files back to original for this game folder? Saved patch downloads are deleted too.
 reset-patch-success-confirmation = Patched files were reset successfully.
 resetting-label = Resetting...
 server-switch-label = Switch Server Files
@@ -335,7 +335,7 @@ settings-info-wine-prefix-proton-body = For launching through Steam as a non-Ste
 settings-info-wine-prefix-custom-body = Uses a Wine prefix folder you choose.
 settings-info-wine-prefix-custom-path-body = Folder used when Custom Prefix is selected.
 settings-info-wine-prefix-custom-browse-body = Browse to an existing Wine prefix folder.
-settings-info-reset-patch-body = Restore patched files back to the original game state for the active server.
+settings-info-reset-patch-body = Restore patched files back to the original game state for the active server, and delete the saved patch downloads (kept so that switching between Stable and a pre-release does not download them again).
 settings-session-lock-tooltip = Log-out to adjust
 controller-vibration-label = Vibration
 settings-audio-title = Audio

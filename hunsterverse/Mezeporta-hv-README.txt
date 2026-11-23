@@ -29,6 +29,11 @@ This is the Mezeporta launcher v1.5.4 by LilButter
   prefix setting is kept (it was reset to "portable", so starting the game
   failed with "failed to run wine reg") and offered without Dev Mode; with
   no Wine installed the launcher uses the installer's Proton by itself.
+- 1.5.4-hv4 (2026-11-23): patch files the launcher downloaded are kept per
+  server (Mezeporta/PatchCache), so switching between Stable and a
+  pre-release and back takes them from there instead of downloading them
+  again (each file's hash is checked first). Settings, "Reset patched files"
+  also deletes them.
 
 Source code: Mezeporta-v{version}-source.zip on the same release page
 (https://github.com/EclipseKnight/Mezeporta/releases), and the git history of

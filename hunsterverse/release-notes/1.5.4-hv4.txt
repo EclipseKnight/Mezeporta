@@ -1,0 +1,2 @@
+Switching between Stable and a pre-release no longer downloads the same patch files again: the launcher keeps the files it downloaded for each server and checks them before use.
+Settings, "Reset patched files" also deletes these saved patch files.

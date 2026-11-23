@@ -1,4 +1,5 @@
 use crate::hv_patch;
+use crate::hv_patch_cache::{self, PatchCache};
 use crate::manifest::Manifest;
 use crate::{server::PatcherResponse, LogPayload};
 use log::{info, warn};
@@ -244,6 +245,8 @@ fn parse_queue_position_from_headers(headers: &reqwest::header::HeaderMap) -> us
 struct ChangedPath {
     target_path: String,
     source_path: String,
+    // Hunsterverse (1.5.4-hv4): the manifest's hash, for the patch cache.
+    hash: String,
 }
 
 fn normalize_manifest_path(path: &str) -> Result<String, &'static str> {
@@ -286,7 +289,7 @@ fn file_crc32(file: &mut fs::File) -> io::Result<u32> {
     Ok(!crc)
 }
 
-fn checksum_matches(path: &Path, expected: &str) -> bool {
+pub(crate) fn checksum_matches(path: &Path, expected: &str) -> bool {
     let expected = expected.trim();
     let Ok(mut file) = fs::File::open(path) else {
         return false;
@@ -347,22 +350,61 @@ fn get_changed_paths(
             Some(Ok(ChangedPath {
                 target_path,
                 source_path,
+                hash: patcher_hash.trim().to_string(),
             }))
         })
         .collect::<Result<Vec<_>, _>>()
         .or(Err(NETWORK_ERROR))
 }
 
+/// Hunsterverse (1.5.4-hv4): every (hash, target path) of a manifest, for
+/// the patch cache's record of an installed version.
+fn manifest_entries(patcher_content: &str) -> Vec<(String, String)> {
+    patcher_content
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let hash = fields.next()?.trim();
+            let target = normalize_manifest_path(fields.next()?).ok()?;
+            Some((hash.to_string(), target))
+        })
+        .collect()
+}
+
+/// Hunsterverse (1.5.4-hv4): put every changed file this server's patch cache
+/// holds (with the manifest's hash) into the patcher folder, as a download
+/// would. Returns the files still to download.
+fn take_cached_paths(
+    changed_paths: &[ChangedPath],
+    patcher_folder: &Path,
+    cache: &PatchCache,
+) -> Result<Vec<ChangedPath>, &'static str> {
+    let mut missing = Vec::new();
+    for changed_path in changed_paths {
+        let patcher_path = patcher_folder.join(&changed_path.target_path);
+        fs::create_dir_all(patcher_path.parent().ok_or(FILE_ERROR)?).or(Err(FILE_ERROR))?;
+        if cache.take(&changed_path.hash, &changed_path.target_path, &patcher_path) {
+            info!("patch cache: {} taken from the cache", changed_path.target_path);
+        } else {
+            missing.push(changed_path.clone());
+        }
+    }
+    Ok(missing)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn download_changed_paths(
     window: &Window,
     client: &reqwest::Client,
     patcher_url: &str,
     changed_paths: &[ChangedPath],
+    total: usize,
+    done_before: usize,
     patcher_folder: &Path,
+    cache: &mut PatchCache,
     cancel: CancellationToken,
 ) -> Result<(), &'static str> {
-    let total = changed_paths.len();
-    let mut current = 0;
+    let mut current = done_before;
     for changed_path in changed_paths {
         let req = client
             .get(format!("{}/{}", patcher_url, changed_path.source_path))
@@ -385,7 +427,7 @@ async fn download_changed_paths(
             .write(true)
             .truncate(true)
             .create(true)
-            .open(patcher_path)
+            .open(&patcher_path)
             .or(Err(FILE_ERROR))?;
         while let Some(chunk) = select! {
             _ = cancel.cancelled() => return Ok(()),
@@ -393,6 +435,10 @@ async fn download_changed_paths(
         } {
             file.write_all(&chunk).or(Err(NETWORK_ERROR))?;
         }
+        drop(file);
+        // Hunsterverse (1.5.4-hv4): keep it for later switches (only if its
+        // hash matches the manifest).
+        cache.store(&changed_path.hash, &changed_path.target_path, &patcher_path);
         current += 1;
         send_event(window, total, current, State::Downloading, 0);
     }
@@ -746,15 +792,30 @@ async fn patch_internal(
     // Compare hashes before downloading only the changed paths.
     send_event(window, 0, 0, State::Checking, patcher_resp.queue_position);
     let changed_paths = get_changed_paths(&patcher_resp.content, game_folder)?;
-    send_event(window, changed_paths.len(), 0, State::Downloading, 0);
+    let total = changed_paths.len();
+    send_event(window, total, 0, State::Downloading, 0);
+
+    // Hunsterverse (1.5.4-hv4): files this server's patch cache has (same
+    // hash) come from there; the rest are downloaded. All of them are in the
+    // patcher folder before anything in the game folder moves.
+    let mut cache = PatchCache::open(game_folder, &patcher_resp.server_name);
+    let to_download = take_cached_paths(&changed_paths, patcher_folder, &cache)?;
+    let from_cache = total - to_download.len();
+    if from_cache > 0 {
+        info!("patch cache: {} of {} changed files from the cache", from_cache, total);
+        send_event(window, total, from_cache, State::Downloading, 0);
+    }
 
     // Download the changed files into the patcher temp folder.
     download_changed_paths(
         window,
         &client,
         &patcher_url,
-        &changed_paths,
+        &to_download,
+        total,
+        from_cache,
         patcher_folder,
+        &mut cache,
         cancel.clone(),
     )
     .await?;
@@ -916,11 +977,25 @@ pub async fn patch(
         warn!("failed to cache {}: {}", CLIENT_ETAG_FILE, e);
     }
     hv_patch::record_installed(&game_folder, &target_server, &patcher_url_for_record, &target_etag);
+    hv_patch_cache::remember_installed(
+        &game_folder,
+        &target_server,
+        &target_etag,
+        &hv_patch::served_channel(&patcher_url_for_record),
+        &manifest_entries(&patcher_resp.content),
+    );
 }
+/// Changed by Hunsterverse (1.5.4-hv4): `clear_patch_cache` (Settings, Reset
+/// patched files) also deletes the kept patch downloads of every server; the
+/// reset before a switch to another server keeps them.
 #[tauri::command]
-pub async fn reset_game_files(game_folder: String) -> Result<(), String> {
+pub async fn reset_game_files(game_folder: String, clear_patch_cache: Option<bool>) -> Result<(), String> {
     let root = PathBuf::from(&game_folder);
-    reset_game_files_internal(&root)
+    reset_game_files_internal(&root)?;
+    if clear_patch_cache == Some(true) {
+        hv_patch_cache::clear_all(&root).map_err(|e| format!("clearing the patch cache failed: {e}"))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -937,7 +1012,7 @@ mod hv_tests {
     }
 
     fn changed(rel: &str) -> ChangedPath {
-        ChangedPath { target_path: rel.into(), source_path: rel.into() }
+        ChangedPath { target_path: rel.into(), source_path: rel.into(), hash: String::new() }
     }
 
     #[test]
@@ -1005,6 +1080,107 @@ mod hv_tests {
         assert_eq!(fs::read_to_string(game.join("b.dll")).unwrap(), "original b");
         assert_eq!(fs::read_to_string(outside.join("x.txt")).unwrap(), "outside");
         assert!(outside.join("x.txt.mezeb").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    // --- Hunsterverse (1.5.4-hv4): the patch cache --------------------------
+
+    fn sha(text: &str) -> String {
+        format!("{:x}", sha2::Sha256::digest(text.as_bytes()))
+    }
+
+    /// What download_changed_paths does with a finished download.
+    fn fake_download(tmp: &Path, cache: &mut PatchCache, path: &ChangedPath, body: &str) {
+        let file = tmp.join(&path.target_path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, body).unwrap();
+        cache.store(&path.hash, &path.target_path, &file);
+    }
+
+    #[test]
+    fn hv_patch_cache_hit_miss_corrupted_and_cleanup() {
+        let root = scratch("cache");
+        let game = root.join("game");
+        let tmp = game.join("tmp");
+        fs::create_dir_all(game.join("dat")).unwrap();
+        fs::write(game.join("a.dll"), "original a").unwrap();
+        fs::write(game.join("dat/c.bin"), "original c").unwrap();
+        fs::write(game.join("dat/d.bin"), "original d").unwrap();
+        let server = "127.0.0.1:8080";
+        let manifest = format!(
+            "{}\t/a.dll\n{}\t/new.dll\n{}\t/dat/c.bin\n{}\t/dat/d.bin\n",
+            sha("patched a"), sha("patched new"), sha("patched c"), sha("patched d")
+        );
+        let changed = get_changed_paths(&manifest, &game).unwrap();
+        assert_eq!(changed.len(), 4);
+
+        // First patch: everything is downloaded and kept, except d.bin, whose
+        // download does not match the manifest hash (kept nowhere).
+        let mut cache = PatchCache::open(&game, server);
+        let missing = take_cached_paths(&changed, &tmp, &cache).unwrap();
+        assert_eq!(missing.len(), 4, "empty cache: every file is a miss");
+        for (path, body) in changed.iter().zip(["patched a", "patched new", "patched c", "not d"]) {
+            fake_download(&tmp, &mut cache, path, body);
+        }
+        let files = hv_patch_cache::server_dir(&game, server).join("files");
+        assert!(files.join(sha("patched a")).is_file());
+        assert!(!files.join(sha("patched d")).exists() && !files.join(sha("not d")).exists());
+        fs::write(files.join(sha("old version")), "old version").unwrap();
+        hv_patch_cache::remember_installed(&game, server, "\"E1\"", "stable", &manifest_entries(&manifest));
+        assert!(!files.join(sha("old version")).exists(), "cleanup drops files no version lists");
+        fs::remove_dir_all(&tmp).unwrap();
+
+        // A cached file that no longer matches its hash is dropped and
+        // downloaded again.
+        let c_key = files.join(sha("patched c"));
+        fs::remove_file(&c_key).unwrap();
+        fs::write(&c_key, "bit rot").unwrap();
+
+        // Next patch: a.dll and new.dll come from the cache; c.bin (corrupted)
+        // and d.bin (never kept) are left to download.
+        let missing = take_cached_paths(&changed, &tmp, &cache).unwrap();
+        let names: Vec<&str> = missing.iter().map(|p| p.target_path.as_str()).collect();
+        assert_eq!(names, ["dat/c.bin", "dat/d.bin"]);
+        assert_eq!(fs::read_to_string(tmp.join("a.dll")).unwrap(), "patched a");
+        assert_eq!(fs::read_to_string(tmp.join("new.dll")).unwrap(), "patched new");
+        assert!(!tmp.join("dat/c.bin").exists());
+        assert!(!c_key.exists(), "the corrupted cache file is removed");
+
+        // The rest downloads, then the move goes as before.
+        fake_download(&tmp, &mut cache, &missing[0], "patched c");
+        fake_download(&tmp, &mut cache, &missing[1], "patched d");
+        let mut m = Manifest::load(&game, server);
+        move_changed_paths(&changed, &tmp, &game, &mut m, server).unwrap();
+        assert_eq!(fs::read_to_string(game.join("a.dll")).unwrap(), "patched a");
+        assert_eq!(fs::read_to_string(game.join("dat/c.bin")).unwrap(), "patched c");
+        assert!(get_changed_paths(&manifest, &game).unwrap().is_empty());
+        assert!(c_key.is_file(), "the fresh download is kept again");
+
+        // Restoring the originals leaves the cache intact; a later patch is
+        // all from the cache.
+        restore_server(&game, server).unwrap();
+        assert_eq!(fs::read_to_string(game.join("a.dll")).unwrap(), "original a");
+        assert!(!game.join("new.dll").exists());
+        assert!(files.join(sha("patched new")).is_file());
+        let changed = get_changed_paths(&manifest, &game).unwrap();
+        assert!(take_cached_paths(&changed, &tmp, &cache).unwrap().is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn hv_patch_cache_is_per_server() {
+        let root = scratch("cache-server");
+        let game = root.join("game");
+        let tmp = game.join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        let manifest = format!("{}\t/a.dll\n", sha("patched a"));
+        let changed = get_changed_paths(&manifest, &game).unwrap();
+        let mut one = PatchCache::open(&game, "one.example:80");
+        fake_download(&tmp, &mut one, &changed[0], "patched a");
+        fs::remove_dir_all(&tmp).unwrap();
+        let other = PatchCache::open(&game, "two.example:80");
+        assert_eq!(take_cached_paths(&changed, &tmp, &other).unwrap().len(), 1);
+        assert!(take_cached_paths(&changed, &tmp, &one).unwrap().is_empty());
         fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -3186,8 +3186,11 @@ export async function dialogConfirmResetPatch() {
   startResetProgressAnimation();
 
   try {
+    // Hunsterverse (1.5.4-hv4): this reset also deletes the kept patch
+    // downloads (Mezeporta/PatchCache); the reset before a server switch keeps them.
     await handleInvoke("reset_game_files", {
       gameFolder,
+      clearPatchCache: true,
     });
     await finishResetProgressAnimation();
     storePrivate.dialogLoading = false;

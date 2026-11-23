@@ -7,8 +7,9 @@ drive.py SCENARIO GAME_DIR STATE_DIR [SHOTS_DIR]
 SCENARIO:
   patch    log in, install the stable patch, check the panel's link to the
            full pre-release notes (clicked through a stand-in xdg-open), switch
-           to the pre-release "mods" (with the one-time confirmation), then back
-           to Stable, checking the game folder after each step
+           to the pre-release "mods" (with the one-time confirmation), back
+           to Stable, and to "mods" again, checking the game folder after each
+           step; the last two switches download nothing (patch cache, hv4)
   events   the event badges come from the account API's events/current and
            festa answers (STATE_DIR/events-current.json, festa.json); with
            that API down, from the game server's flags (Hunter Festa only);
@@ -24,7 +25,7 @@ SCENARIO:
            is installed and the launcher restarts into it
 Prints "ok ..." per check; exits 1 at the first failure.
 
-Env: NEXT_VERSION  the version the update offers (default 1.5.4-hv3);
+Env: NEXT_VERSION  the version the update offers (default 1.5.4-hv5);
      NEW_VERSION   if set, the header must read "release ver. NEW_VERSION";
      SHOTS         if set, a folder for screenshots of the character page
                    (default window size and a small one), of the open Patch
@@ -41,7 +42,7 @@ import time
 import urllib.request
 
 DRIVER = "http://127.0.0.1:4444"
-NEXT_VERSION = os.environ.get("NEXT_VERSION", "1.5.4-hv3")
+NEXT_VERSION = os.environ.get("NEXT_VERSION", "1.5.4-hv5")
 ELEMENT = "element-6066-11e4-a52e-4f735466cecc"
 
 
@@ -298,6 +299,49 @@ def notes_link(s, state):
     ok("notes link opens %s in the browser; panel still open, no error" % NOTES_URL)
 
 
+def requests_seen(state):
+    with open(os.path.join(state, "requests.log")) as f:
+        return f.read().splitlines()
+
+
+def file_downloads(lines):
+    """Files served on the game port (GET 200, not /check, not the launcher
+    API; the launcher's /version and unit image requests answer 404)."""
+    out = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) != 4 or parts[1] != "GET" or parts[3] != "200":
+            continue
+        p = parts[2].split("?", 1)[0]
+        if p == "/check" or p.endswith("/check") or p.startswith("/v2/") or p.startswith("/api/") \
+                or p == "/latest.json" or p == "/prerelease/slots":
+            continue
+        out.append(line)
+    return out
+
+
+def patch_cache_files(game):
+    root = os.path.join(game, "Mezeporta", "PatchCache")
+    servers = os.listdir(root) if os.path.isdir(root) else []
+    if len(servers) != 1:
+        fail("expected one server folder in Mezeporta/PatchCache, found %r" % servers)
+    files = os.path.join(root, servers[0], "files")
+    return sorted(os.listdir(files)) if os.path.isdir(files) else []
+
+
+def choose_pre_release(s, state, what):
+    s.wait(CLICK_TEXT, "the mods choice", 10, ".hv-panel .hv-choices button", "Pre-release mods")
+    s.wait("return !!document.querySelector('.hv-confirm')", "the pre-release explanation", 20)
+    if read_channel(state) != "stable":
+        fail("channel changed before the player confirmed")
+    ok("pre-release choice asks for confirmation first (account still stable)")
+    s.wait(CLICK_TEXT, "I understand", 10, ".hv-confirm button", "I understand")
+    install_patch_dialog(s, what)
+    chip(s, "Patch: Pre-release mods v1.31-pre2", "after " + what)
+    if read_channel(state) != "pre:mods":
+        fail("account channel is %s" % read_channel(state))
+
+
 def scenario_patch(game, state):
     s = Session(os.path.join(game, "mezeporta-bin"))
     try:
@@ -314,18 +358,19 @@ def scenario_patch(game, state):
             fail("panel facts: %r" % facts)
         ok("panel: installed and served = Stable v1.30, up to date")
         notes_link(s, state)
-        s.wait(CLICK_TEXT, "the mods choice", 10, ".hv-panel .hv-choices button", "Pre-release mods")
-        s.wait("return !!document.querySelector('.hv-confirm')", "the pre-release explanation", 20)
-        if read_channel(state) != "stable":
-            fail("channel changed before the player confirmed")
-        ok("first pre-release choice asks for confirmation first (account still stable)")
-        s.wait(CLICK_TEXT, "I understand", 10, ".hv-confirm button", "I understand")
-        install_patch_dialog(s, "switch to mods")
-        chip(s, "Patch: Pre-release mods v1.31-pre2", "after switching to mods")
-        if read_channel(state) != "pre:mods":
-            fail("account channel is %s" % read_channel(state))
+        choose_pre_release(s, state, "switch to mods")
         files_are(game, os.path.join(state, "slots", "mods"))
         ok("account on pre:mods (API), game folder holds the mods patch (hvmods.dll added)")
+        downloaded = file_downloads(requests_seen(state))
+        if len(downloaded) != 4:
+            fail("first round: expected 4 file downloads (2 stable, 2 mods), got %r" % downloaded)
+        # Stable mhfo-hd.dll and a.pac, mods mhfo-hd.dll and hvmods.dll (a.pac
+        # is the same file in both: one cache entry).
+        cached = patch_cache_files(game)
+        if len(cached) != 4:
+            fail("patch cache holds %r, expected 4 files" % cached)
+        ok("first round downloaded 4 files; the patch cache keeps 4 (Mezeporta/PatchCache/<server>/files)")
+        mark = len(requests_seen(state))
 
         open_panel(s)
         s.wait(CLICK_TEXT, "the Stable choice", 10, ".hv-panel .hv-choices button", "Stable")
@@ -341,6 +386,21 @@ def scenario_patch(game, state):
         if unexpected:
             fail("unexpected backups: %s" % unexpected)
         ok("only the stable patch's own backups of the original files remain")
+
+        # hv4: back to the pre-release; this and the switch to Stable above
+        # come from the patch cache, without downloading anything.
+        open_panel(s)
+        choose_pre_release(s, state, "mods again")
+        files_are(game, os.path.join(state, "slots", "mods"))
+        ok("on pre:mods again, game folder holds the mods patch")
+        after = requests_seen(state)[mark:]
+        if not any(" /check " in l or l.split()[2].endswith("/check") for l in after if len(l.split()) == 4):
+            fail("no /check after the first round: the launcher did not patch again")
+        if file_downloads(after):
+            fail("Stable -> mods again downloaded files: %r" % file_downloads(after))
+        ok("Stable and mods again: no file downloaded (%d requests, all /check or API)" % len(after))
+        if len(patch_cache_files(game)) != 4:
+            fail("patch cache changed: %r" % patch_cache_files(game))
     finally:
         s.close()
 

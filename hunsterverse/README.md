@@ -10,6 +10,7 @@ this folder, `src-tauri/src/hv_*.rs` and `src/components/HunsterversePanel.vue`.
 | 1.5.4-hv1 (2026-11-05) | Patch downloads fail after 60 s without data instead of 10 s per file (`patcher.rs`, `server.rs`, `main.rs`) |
 | 1.5.4-hv2 (2026-11-23) | Client patch choice, launcher self-update, safer patching (below) |
 | 1.5.4-hv3 (2026-11-23) | The Patch button moved off the CAPCOM logo (classic: in the footer after "Online Players"; PS4 style: right of Settings), part of the launcher layout so it scales with the window; the header's "release ver." comes from `tauri.conf.json` (hv2 still said hv1); event badges from the website's event list (below); Proton on the Steam Deck (below) |
+| 1.5.4-hv4 (2026-11-23) | Downloaded patch files are kept per server (patch cache, below): switching Stable <-> pre-release takes them from there instead of downloading again |
 
 ## Client patch choice (hv2)
 
@@ -43,8 +44,9 @@ the new `patchServer` (`/prerelease/<slot>` for a pre-release, the wrapper's
 own `/check` for stable; `server/api/prerelease.go` `patchServerFor`), and the
 launcher's normal "Server Updates" dialog installs it: it restores the files
 the previous patch replaced (`*.mezeb`), removes the files it added, then
-downloads what differs. Pre-release and stable share the server key
-(`host:port`), so it is one patch state per server.
+downloads what differs (since hv4 from the patch cache when it has the
+file, below). Pre-release and stable share the server key (`host:port`), so
+it is one patch state per server.
 
 The panel only appears for servers in `HUNSTERVERSE_HOSTS` (`hv_patch.rs`:
 `129.213.54.221`) and talks only to `HUNSTERVERSE_API`
@@ -70,6 +72,41 @@ ETag, version once known).
 - Unchanged: downloads go to `<game>/tmp/` first and nothing moves until all
   of them arrived; a failed download leaves the folder with the original
   files and the next login tries again.
+
+## Patch cache (hv4, `hv_patch_cache.rs`)
+
+Every patch file the launcher downloads is kept in
+`<game>/Mezeporta/PatchCache/<host_port>/files/` (the same server key as
+`Mezeporta/Servers/<host_port>/`, but outside it: that folder is wiped
+whenever the server's patch changes). Before downloading a changed file the
+patcher looks there; a file with the manifest's hash goes into `tmp/` like a
+download, so switching Stable -> pre-release -> Stable downloads only the
+first time. Any server, each only from its own folder.
+
+- Key: the hash of the `/check` line. The wrapper's `/check` and Erupe's
+  `/prerelease/<slot>/check` give `<sha256 hex>\t/<path>`, so the key is the
+  sha256 (content-addressed: a file both patches share is kept once). Servers
+  with the native manifest give a CRC32; its key also holds the path
+  (`crc32-<crc>-<16 hex of sha256(path)>`), so a hit is as safe as the
+  patcher's own "this game file already matches" check.
+- Safety: a download goes in only if its hash matches the manifest (one that
+  does not is installed as before, just not kept); a cached file is hashed
+  again after it was put into `tmp/`, and one that does not match is deleted
+  and downloaded. Cache hits happen in the download stage, so the hv2 rules
+  stay: nothing moves before every file is in `tmp/`, rollback as before.
+  Files are hard-linked (no extra disk space; the installed game file and the
+  cache share it), copied where links fail (FAT/exFAT, another volume).
+  Caching never fails a patch: a write error (disk full, a locked file)
+  stops caching for that run; a file that cannot be removed (Windows lock) is
+  retried at the next cleanup.
+- Cleanup after each completed patch (`index.json` lists the versions by
+  `/check` ETag, with channel and last install): keep the 4 most recently
+  installed versions and at most 2 GiB per server. The oldest go first; the
+  newest version of each other channel goes last; the installed version is
+  never dropped. Files no kept version lists are deleted.
+- Clearing: Settings, Maintenance, "Reset patched files" also deletes the
+  whole `Mezeporta/PatchCache` (the confirmation says so). The reset the
+  launcher does before switching to another server keeps it.
 
 ## Launcher self-update (hv2, `hv_update.rs`)
 
@@ -221,7 +258,9 @@ launcher updates; launchers already updated stay on it until a newer release.
   and its failure, the channel from a patchServer URL, the installed record,
   and the patcher: a move that fails half-way is rolled back, a move then
   restore round trip, the restore walk not following symlinks, and when the
-  game starts through Proton (`hv_proton`). (The
+  game starts through Proton (`hv_proton`), and the patch cache (hv4: hit,
+  miss, a corrupted cache file, a download that does not match its hash,
+  per-server folders, cleanup order and the size cap, `hv_patch_cache`). (The
   `--target` matters: `.cargo/config.toml` defaults to Windows i686.)
 - `hunsterverse/test-e2e.sh NEW_BIN NEXT_BIN` (env `NEXT_VERSION`, `NEW_VERSION`,
   `SCENARIOS`, `SHOTS`: see the script's header): the real Linux launcher under
@@ -230,7 +269,9 @@ launcher updates; launchers already updated stay on it until a newer release.
   server, account or game data): first login installs stable; the panel
   shows installed/served and the pre-release notes link (clicked through a
   stand-in `xdg-open` that records the URL; screenshot with `SHOTS`); pre-release with the confirmation, then back to
-  Stable, with the game folder checked after each; the Patch button inside
+  Stable, then the pre-release again, with the game folder checked after
+  each; the last two switches download no file (hv4 patch cache, counted
+  in the stand-in's request log); the Patch button inside
   the launcher layout covering nothing at the default and a small window size
   (screenshots with `SHOTS`); the event badges from a stand-in events API
   (classic and PS4 style, screenshots), and the wrapper's flags while that
