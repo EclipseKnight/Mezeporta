@@ -9,7 +9,7 @@ this folder, `src-tauri/src/hv_*.rs` and `src/components/HunsterversePanel.vue`.
 |---|---|
 | 1.5.4-hv1 (2026-11-05) | Patch downloads fail after 60 s without data instead of 10 s per file (`patcher.rs`, `server.rs`, `main.rs`) |
 | 1.5.4-hv2 (2026-11-23) | Client patch choice, launcher self-update, safer patching (below) |
-| 1.5.4-hv3 (2026-11-23) | The Patch button moved off the CAPCOM logo (classic: in the footer after "Online Players"; PS4 style: right of Settings), part of the launcher layout so it scales with the window; the header's "release ver." comes from `tauri.conf.json` (hv2 still said hv1) |
+| 1.5.4-hv3 (2026-11-23) | The Patch button moved off the CAPCOM logo (classic: in the footer after "Online Players"; PS4 style: right of Settings), part of the launcher layout so it scales with the window; the header's "release ver." comes from `tauri.conf.json` (hv2 still said hv1); event badges from the website's event list (below); Proton on the Steam Deck (below) |
 
 ## Client patch choice (hv2)
 
@@ -140,6 +140,55 @@ password and is wiped by every SteamOS update.
 - To change keys: put the new public key in `hv_update.rs` and release that
   version signed with the **old** key; sign everything after with the new one.
 
+## Event badges (Hunsterverse events)
+
+The badges at the bottom of the character page (upstream's
+`src/activeEvents.js`) come from the wrapper's `/v2/server/status`, which
+builds them from Erupe's old config (Festa/Diva/Tournament overrides,
+EarthStatus) and the `events` table. On our server that only ever gives the
+Hunter Festa: our own events are not in those flags. For servers in
+`HUNSTERVERSE_HOSTS` the launcher also reads the REST API's public
+`/api/public/events/current` and `/api/public/festa` (the website's Events
+page, `js/events.js`; `hv_events.rs`, command `hv_live_events`), and
+`src/hvEvents.js` turns them into badges, with the website's rules:
+
+| Badge | Shown when | Art |
+|---|---|---|
+| Hunter Festa | the festa answer has a phase (entry, souls, judging, rewards); the panel names it | upstream |
+| Speedrun Cup | its row's cycle runs and the phase is open, tallying or results | upstream Hunting Tournament |
+| VS Bracket | its cycle runs: sign-up, drawing, a round, results (not upcoming or "no bracket") | ours, `VsBracket.png` |
+| Diva Defense | its cycle runs (personal, tactics, rewards, between) | upstream |
+| Event campaigns | open campaigns (the panel lists them) | ours, `Campaigns.png` |
+| MezFes, Sky Corridor (upstream Tenro art), Raviente, Hunting Road vote | always (no schedule) | upstream; Raviente and Road vote ours |
+
+Ours are drawn by `make_event_badges.py` (Raviente: the website's monster
+icon). If `events/current` does not answer, the badges are the wrapper's
+flags as before; if only `festa` fails, the wrapper's flag decides the Hunter
+Festa. Pallone Festival and Conquest still come from the wrapper's flags.
+Other servers are unchanged (`hv_live_events` answers null for them).
+
+## Proton on the Steam Deck (hv3, `hv_proton.rs`)
+
+On a Steam Deck the player installer (`hvmhfz_ops/player-installer`) sets
+the Wine prefix mode to `proton` and starts the launcher with
+`MEZEPORTA_PROTON_CMD` (its `proton-host.sh`, which runs Steam's Proton
+outside the Flatpak runtime) and `STEAM_COMPAT_DATA_PATH`. SteamOS has no
+Wine. Up to hv2 the settings page reset `proton` to `portable` whenever Dev
+Mode was off, so the game start ran plain `wine` and failed ("failed to run
+wine reg: No such file or directory"). Now:
+
+- `proton` is never reset, and offered in Settings, Advanced, Wine Prefix
+  without Dev Mode (`SettingsList.vue`).
+- At game start, a Wine mode (portable, system, custom) with no Wine found
+  and an existing `MEZEPORTA_PROTON_CMD` starts through Proton anyway
+  (`resolve_launch_wine_runtime`), so players whose setting was already
+  reset work without touching it.
+- In Proton mode: no `wineserver -k` (Proton has its own), the controller
+  override check looks at `$STEAM_COMPAT_DATA_PATH/pfx` (not `~/.wine`), and
+  a missing `STEAM_COMPAT_DATA_PATH` gives a clear error. The missing-tools
+  check already wanted only the Proton command (no wineserver, winetricks);
+  the portable prefix install stays Wine only.
+
 ## Making a release
 
 1. Bump the version in `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`
@@ -167,7 +216,8 @@ launcher updates; launchers already updated stay on it until a newer release.
   version order, manifest, signatures (good, changed, wrong key), file swap
   and its failure, the channel from a patchServer URL, the installed record,
   and the patcher: a move that fails half-way is rolled back, a move then
-  restore round trip, and the restore walk not following symlinks. (The
+  restore round trip, the restore walk not following symlinks, and when the
+  game starts through Proton (`hv_proton`). (The
   `--target` matters: `.cargo/config.toml` defaults to Windows i686.)
 - `hunsterverse/test-e2e.sh NEW_BIN NEXT_BIN` (env `NEXT_VERSION`, `NEW_VERSION`,
   `SCENARIOS`, `SHOTS`: see the script's header): the real Linux launcher under
@@ -177,5 +227,11 @@ launcher updates; launchers already updated stay on it until a newer release.
   shows installed/served; pre-release with the confirmation, then back to
   Stable, with the game folder checked after each; the Patch button inside
   the launcher layout covering nothing at the default and a small window size
-  (screenshots with `SHOTS`); a tampered update refused, the signed one
-  installed and restarted in place.
+  (screenshots with `SHOTS`); the event badges from a stand-in events API
+  (classic and PS4 style, screenshots), and the wrapper's flags while that
+  API is down; Steam Deck: with no Wine and a stand-in Proton, Start runs
+  `proton run meze-deps.exe --stdin-b64` (setting `portable` or `proton`),
+  and `proton` stays set with Dev Mode off; a tampered update refused, the signed one installed and
+  restarted in place.
+- `node --test hunsterverse/tests/*.test.mjs`: the event badge rules
+  (`src/hvEvents.js`).

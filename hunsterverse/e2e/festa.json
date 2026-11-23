@@ -1,0 +1,6 @@
+{
+  "now": "2026-11-27T12:00:00Z",
+  "festival": {"id": 1, "start": "2026-11-17T15:00:00Z", "entryEnd": "2026-12-01T15:00:00Z",
+               "soulsEnd": "2026-12-22T15:00:00Z", "judgingEnd": "2026-12-22T17:30:00Z",
+               "rewardsEnd": "2027-01-11T03:00:00Z", "stored": true, "phase": "entry"}
+}

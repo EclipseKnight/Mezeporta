@@ -11,7 +11,9 @@ mod altclient_stats;
 mod cli;
 mod config;
 mod endpoint;
+mod hv_events;
 mod hv_patch;
+mod hv_proton;
 mod hv_update;
 mod manifest;
 mod patcher;
@@ -1502,7 +1504,7 @@ fn resolve_wine_command() -> PathBuf {
 #[cfg(not(windows))]
 fn resolve_proton_command() -> PathBuf {
     PathBuf::from(
-        std::env::var("MEZEPORTA_PROTON_CMD")
+        std::env::var(hv_proton::INSTALLER_PROTON_ENV)
             .ok()
             .filter(|value| !value.trim().is_empty())
             .or_else(|| {
@@ -1629,7 +1631,7 @@ fn run_wine_reg_command(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|err| format!("failed to run wine reg: {}", err))
+        .map_err(|err| format!("failed to run {} reg: {}", runtime.program_name(), err))
 }
 
 #[cfg(not(windows))]
@@ -1700,15 +1702,21 @@ fn sync_wine_controller_overrides(
         return Ok(());
     }
 
+    // Hunsterverse: Proton keeps its prefix in $STEAM_COMPAT_DATA_PATH/pfx.
+    let fallback_prefix = if runtime.kind == WineRuntimeKind::Proton {
+        hv_proton::compat_prefix(
+            std::env::var_os("STEAM_COMPAT_DATA_PATH")
+                .as_deref()
+                .map(Path::new),
+        )
+    } else {
+        default_system_wine_prefix()
+    };
     let prefix_initialized = runtime
         .wine_prefix
         .as_deref()
         .map(wine_prefix_initialized)
-        .or_else(|| {
-            default_system_wine_prefix()
-                .as_deref()
-                .map(wine_prefix_initialized)
-        })
+        .or_else(|| fallback_prefix.as_deref().map(wine_prefix_initialized))
         .unwrap_or(false);
 
     if !prefix_initialized {
@@ -1783,6 +1791,42 @@ fn resolve_wine_runtime(
         apply_esync_fallback: std::env::var_os("WINEESYNC").is_none(),
         apply_fsync_fallback: std::env::var_os("WINEFSYNC").is_none(),
     })
+}
+
+/// Hunsterverse: the runtime the game starts with. As the setting says, except
+/// that with no Wine installed and the installer's Proton command present
+/// (Steam Deck), Proton is used (`hv_proton::launch_mode`).
+#[cfg(not(windows))]
+fn resolve_launch_wine_runtime(
+    game_root: &Path,
+    launcher_prefs: &LauncherPrefs,
+) -> Result<ResolvedWineRuntime, String> {
+    let configured = normalize_wine_prefix_mode(&launcher_prefs.wine_prefix_mode);
+    let installer_proton_found = hv_proton::installer_proton_command(
+        std::env::var(hv_proton::INSTALLER_PROTON_ENV)
+            .ok()
+            .as_deref(),
+    )
+    .map(|command| command_exists(&command))
+    .unwrap_or(false);
+    let mode = hv_proton::launch_mode(
+        &configured,
+        command_exists(&resolve_wine_command()),
+        installer_proton_found,
+    );
+    if mode == configured {
+        return resolve_wine_runtime(game_root, launcher_prefs);
+    }
+    info!(
+        "Wine prefix mode {} but no Wine found: starting through Proton ({})",
+        configured,
+        hv_proton::INSTALLER_PROTON_ENV
+    );
+    let prefs = LauncherPrefs {
+        wine_prefix_mode: mode,
+        ..launcher_prefs.clone()
+    };
+    resolve_wine_runtime(game_root, &prefs)
 }
 
 #[cfg(not(windows))]
@@ -2211,6 +2255,10 @@ struct LinuxPrefixStatus {
 
 #[cfg(not(windows))]
 fn kill_wineserver_with_env(runtime: &ResolvedWineRuntime) {
+    // Hunsterverse: Proton runs its own wineserver; there is none to call here.
+    if runtime.kind == WineRuntimeKind::Proton {
+        return;
+    }
     let mut command = Command::new(&runtime.wineserver_command);
     runtime.apply_env(&mut command);
     let _ = command.arg("-k").status();
@@ -2759,7 +2807,14 @@ pub(crate) fn run_mhf(
             Some(handle) => stage_meze_deps(handle, &game_root)?,
             None => resolve_meze_deps_path(&game_root)?,
         };
-        let runtime = resolve_wine_runtime(&game_root, &launcher_prefs)?;
+        let runtime = resolve_launch_wine_runtime(&game_root, &launcher_prefs)?;
+        if runtime.kind == WineRuntimeKind::Proton {
+            hv_proton::check_compat_data(
+                std::env::var_os("STEAM_COMPAT_DATA_PATH")
+                    .as_deref()
+                    .map(Path::new),
+            )?;
+        }
         sync_wine_controller_overrides(&runtime, launcher_prefs.preload_controller_dlls)?;
         let payload = serde_json::to_vec(&config)
             .map_err(|e| format!("failed to serialize launch config: {e}"))?;
@@ -2785,7 +2840,7 @@ pub(crate) fn run_mhf(
             })
             .current_dir(config.mhf_folder.as_ref().unwrap_or(&game_root))
             .spawn()
-            .map_err(|e| format!("failed to launch wine: {e}"))?;
+            .map_err(|e| format!("failed to launch {}: {e}", runtime.program_name()))?;
 
         if let Some(stdin) = child.stdin.as_mut() {
             stdin
@@ -5268,6 +5323,17 @@ async fn hv_set_patch_channel(
     }
 }
 
+/// Hunsterverse: the events running now, from our REST API (hv_events.rs).
+/// Null for other servers; an error when the API did not answer.
+#[tauri::command]
+async fn hv_live_events(state: tauri::State<'_, TauriState>) -> Result<Value, String> {
+    let host = state.state_sync.lock().await.current_endpoint.host();
+    match hv_patch::account_api_for(&host) {
+        Some(api) => hv_events::fetch(&state.client, &api).await,
+        None => Ok(Value::Null),
+    }
+}
+
 #[tauri::command]
 async fn hv_check_launcher_update(
     state: tauri::State<'_, TauriState>,
@@ -5693,7 +5759,8 @@ fn main() {
                     hv_patch_status,
                     hv_set_patch_channel,
                     hv_check_launcher_update,
-                    hv_install_launcher_update
+                    hv_install_launcher_update,
+                    hv_live_events
                 ])
                 .build(tauri::generate_context!())
             {

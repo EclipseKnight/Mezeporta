@@ -15,7 +15,7 @@
 #           since NEW_BIN only accepts that key.
 # Env: NEXT_VERSION  NEXT_BIN's version (default 1.5.4-hv3);
 #      NEW_VERSION   NEW_BIN's version: if set, the header must show it;
-#      SCENARIOS     default "patch update" (e.g. "update" for an old NEW_BIN);
+#      SCENARIOS     default "patch events proton update" (e.g. "update" for an old NEW_BIN);
 #      SHOTS         folder for screenshots of the character page;
 #      STYLE         launcher look: 1 classic (default), 3 PS4.
 #
@@ -27,6 +27,15 @@
 #           API's confirmation, then the launcher logs in again and installs
 #           it; choosing Stable puts the stable files back and removes the
 #           added file; the account API holds each choice.
+#   events: the event badges come from the account API's events answers
+#           (e2e/events-current.json, festa.json; made-up quests), and from the
+#           game server's flags while that API is down. Screenshots go to
+#           SHOTS_DIR, else SHOTS (default: $WORK/shots; set KEEP_WORK, SHOTS_DIR
+#           or SHOTS to keep them).
+#   proton: Steam Deck. No Wine (MEZEPORTA_WINE_CMD points nowhere) and a
+#           stand-in Proton as the installer's MEZEPORTA_PROTON_CMD: Start runs
+#           it even with the setting reset to "portable" (older launchers did
+#           that); "proton" stays set with Dev Mode off when Settings opens.
 #   update: a tampered download is refused with the file unchanged; the
 #           signed one replaces the binary and the launcher restarts into it
 #           in place (same PID).
@@ -38,7 +47,7 @@ NEW_BIN="$(realpath "$1")"
 NEXT_BIN="$(realpath "$2")"
 KEY="${TAURI_PRIVATE_KEY_PATH:-$HOME/.secrets/mezeporta-updater.key}"
 KEY_PASSWORD_FILE="${HV_KEY_PASSWORD_FILE:-$HOME/.secrets/mezeporta-updater.key.password}"
-NEXT_VERSION="${NEXT_VERSION:-1.5.4-hv3}" SCENARIOS="${SCENARIOS:-patch update}"
+NEXT_VERSION="${NEXT_VERSION:-1.5.4-hv3}" SCENARIOS="${SCENARIOS:-patch events proton update}"
 export NEXT_VERSION
 [[ -z "${SHOTS:-}" ]] || { mkdir -p "$SHOTS"; export SHOTS="$(realpath "$SHOTS")"; }
 GP=${GP:-18480} AP=${AP:-18481} RP=${RP:-18482} DISPLAY_NUM=${DISPLAY_NUM:-97}
@@ -87,6 +96,10 @@ cp "$NEW_BIN" "$GAME/mezeporta-bin"
 printf 'original mhfo-hd\n' > "$GAME/mhfo-hd.dll"
 printf 'original a.pac\n' > "$GAME/dat/a.pac"
 echo keep > "$GAME/other.txt"
+# The game helper the launcher hands to Wine/Proton (made-up bytes; the release
+# zip has the real one in the same place).
+mkdir -p "$GAME/Mezeporta/bin"
+printf 'stand-in meze-deps\n' > "$GAME/Mezeporta/bin/meze-deps.exe"
 python3 -I - "$GAME/Mezeporta/config.json" "$GP" "${STYLE:-1}" <<'EOF'
 import json, sys
 ep = {"url": "127.0.0.1", "name": "Hunsterverse", "launcherPort": int(sys.argv[2]), "gamePort": 53310,
@@ -97,6 +110,19 @@ cfg = {"endpoints": [ep], "current_endpoint": dict(ep),
        "style": int(sys.argv[3])}
 json.dump(cfg, open(sys.argv[1], "w"), indent=2)
 EOF
+
+# Stand-in Proton (as hvmhfz_ops/player-installer/tests): records each call,
+# with the game settings the launcher writes to its stdin.
+mkdir -p "$WORK/proton" "$STATE/compat"
+{ echo '#!/bin/sh'
+  echo "log='$STATE/proton-calls.log'"
+  cat <<'EOF'
+{ echo "ARGS $*"; echo "COMPAT ${STEAM_COMPAT_DATA_PATH:-}"
+  case " $* " in *" --stdin-b64 "*) echo "STDIN $(cat)" ;; esac
+  echo END; } >> "$log"
+EOF
+} > "$WORK/proton/proton"
+chmod +x "$WORK/proton/proton"
 
 python3 -I "$HERE/e2e/fake_servers.py" "$STATE" "$GP" "$AP" "$RP" > "$WORK/servers.out" 2>&1 &
 PIDS+=($!)
@@ -110,6 +136,9 @@ grep -q listening "$WORK/servers.out" || { cat "$WORK/servers.out" >&2; echo "fa
   export DISPLAY=":$DISPLAY_NUM" GDK_BACKEND=x11 WEBKIT_DMABUF_RENDERER_FORCE_SHM=1 RUST_BACKTRACE=1
   export MEZEPORTA_UPDATE_URL="http://127.0.0.1:$RP/latest.json"
   export MEZEPORTA_HV_ACCOUNT_API="http://127.0.0.1:$AP"
+  # Steam Deck set-up as install-hunsterverse.sh writes it, and no Wine.
+  export MEZEPORTA_PROTON_CMD="$WORK/proton/proton" STEAM_COMPAT_DATA_PATH="$STATE/compat"
+  export MEZEPORTA_WINE_CMD="$WORK/no-wine/wine"
   exec tauri-driver --port 4444
 ) > "$WORK/driver.out" 2>&1 &
 PIDS+=($!)
@@ -122,6 +151,20 @@ grep -q " PUT /api/account/patch-channel 409" "$STATE/requests.log" || { echo "F
 [[ $(grep -c " PUT /api/account/patch-channel 200" "$STATE/requests.log") == 2 ]] || { echo "FAIL expected 2 saved choices" >&2; exit 1; }
 grep -q " GET /prerelease/mods/hvmods.dll 200" "$STATE/requests.log" || { echo "FAIL the pre-release file was not downloaded from its slot" >&2; exit 1; }
 echo "ok   API log: 409 confirmation, 2 saved choices; pre-release files came from /prerelease/mods"
+fi
+
+if [[ " $SCENARIOS " == *" events "* ]]; then
+echo "== event badges"
+cp "$HERE/e2e/events-current.json" "$HERE/e2e/festa.json" "$STATE/"
+python3 -I "$HERE/e2e/drive.py" events "$GAME" "$STATE" "${SHOTS_DIR:-${SHOTS:-$WORK/shots}}" || { tail -n 40 "$WORK/driver.out" >&2; exit 1; }
+grep -q " GET /api/public/events/current 200" "$STATE/requests.log" || { echo "FAIL the launcher did not read the events API" >&2; exit 1; }
+grep -q " GET /api/public/events/current 503" "$STATE/requests.log" || { echo "FAIL the fallback run did not try the events API" >&2; exit 1; }
+echo "ok   API log: events read, and tried while down"
+fi
+
+if [[ " $SCENARIOS " == *" proton "* ]]; then
+echo "== Proton (Steam Deck)"
+python3 -I "$HERE/e2e/drive.py" proton "$GAME" "$STATE" || { tail -n 40 "$WORK/driver.out" >&2; exit 1; }
 fi
 
 if [[ " $SCENARIOS " == *" update "* ]]; then

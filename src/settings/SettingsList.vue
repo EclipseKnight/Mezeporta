@@ -465,15 +465,8 @@ watch(showCustomWinePrefixPath, (visible) => {
   }
 });
 
-watch(
-  () => store.settings.devMode,
-  (devMode) => {
-    if (!devMode && store.settings.winePrefixMode === "proton") {
-      setLauncherPrefs({ winePrefixMode: "portable" });
-    }
-  },
-  { immediate: true }
-);
+// Hunsterverse: "proton" is never reset here (it used to fall back to
+// "portable" with Dev Mode off, which broke the Steam Deck install: no Wine).
 
 watch(
   [
@@ -813,13 +806,12 @@ const winePrefixModeOptions = computed(() => {
     },
   ];
 
-  if (store.settings.devMode) {
-    options.push({
-      value: "proton",
-      label: t("wine-prefix-proton-label", "Proton"),
-      infoKey: "wine-prefix-proton",
-    });
-  }
+  // Hunsterverse: Proton for every Linux player (Steam Deck), not only Dev Mode.
+  options.push({
+    value: "proton",
+    label: t("wine-prefix-proton-label", "Proton"),
+    infoKey: "wine-prefix-proton",
+  });
 
   options.push({
     value: "custom",

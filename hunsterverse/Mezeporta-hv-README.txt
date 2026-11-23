@@ -24,6 +24,11 @@ This is the Mezeporta launcher v1.5.4 by LilButter
 - 1.5.4-hv3 (2026-11-23): the "Patch" button moved next to "Online Players"
   (classic look; right of Settings in the PS4 look), so it no longer covers
   the CAPCOM logo. The header shows the launcher's real version again.
+  Event badges come from the Hunsterverse event list (Speedrun Cup, VS
+  Bracket, Raviente, campaigns and more). Steam Deck: the "Proton" Wine
+  prefix setting is kept (it was reset to "portable", so starting the game
+  failed with "failed to run wine reg") and offered without Dev Mode; with
+  no Wine installed the launcher uses the installer's Proton by itself.
 
 Source code: Mezeporta-v{version}-source.zip on the same release page
 (https://github.com/EclipseKnight/Mezeporta/releases), and the git history of
