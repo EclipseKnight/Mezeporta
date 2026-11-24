@@ -1,0 +1,5 @@
+If the game closes or crashes right after it starts, the launcher now says so the next time you open it and offers "Save report": attach that file to your help post on Discord.
+Problem report: when something does not work (login, patch, update, or the game does not start), open Settings, Advanced, Problem report, and press "Save report" (or "Copy report").
+The launcher now keeps log files in Mezeporta/logs next to it (this run and the four before), and the game's exit code. On Linux and the Steam Deck also the game's own output, and "Debug the next game start" adds Wine's debug output.
+The report has your system, the launcher's settings, the game files and crash files, and its recent logs. Passwords, session tokens and keys are never in it, and your home folder is shown as ~.
+Linux and Steam Deck: run the installer again to also get the new run-mezeporta.sh, which logs a launcher that does not open at all.

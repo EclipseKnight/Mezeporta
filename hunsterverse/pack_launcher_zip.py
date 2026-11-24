@@ -13,12 +13,16 @@ Linux zip (a BINARY_NAME without extension, mezeporta-bin): that binary and
 every *.sh get Unix mode 755 (1.5.4-hv4). Upstream's zip is made on Windows
 and stores no Unix modes, so unzipping it over an install (the Play page's
 "Updating the launcher") left run-mezeporta.sh, which the start scripts run,
-not executable: the launcher did not open.
+not executable: the launcher did not open. Since 1.5.4-hv6 its
+run-mezeporta.sh is ours (this folder's, which also keeps a log file).
 """
+import os
 import sys
 import zipfile
 
 DATE = (2026, 11, 23, 0, 0, 0)
+RUN_SCRIPT = "run-mezeporta.sh"
+OUR_RUN_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), RUN_SCRIPT)
 README_NAME = "Mezeporta-hv-README.txt"
 OLD_README_NAMES = {"Mezeporta-hv1-README.txt"}
 
@@ -50,6 +54,10 @@ def main():
                 replaced = True
             else:
                 data = src.read(info.filename)
+                if unix and info.filename == RUN_SCRIPT:
+                    with open(OUR_RUN_SCRIPT, "rb") as f:
+                        data = f.read()
+                    info.file_size = len(data)
                 if unix and info.filename.endswith(".sh"):
                     executable(info)
                 dst.writestr(info, data)

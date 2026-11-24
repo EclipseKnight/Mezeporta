@@ -39,6 +39,17 @@ This is the Mezeporta launcher v1.5.4 by LilButter
   with the Windows prompt instead of failing with "access is denied".
   Patching a protected game folder says so and how to fix it (move the game
   folder somewhere you own, e.g. C:\Games).
+- 1.5.4-hv6: log files and a problem report. The launcher keeps its log
+  in Mezeporta/logs beside it (this run and the four before; on Linux also
+  the game's own output and what run-mezeporta.sh saw). Settings, Advanced,
+  "Problem report": "Save report" writes one text file with your system,
+  the launcher's settings and its recent logs and opens its folder; "Copy
+  report" puts the same text on the clipboard. Attach it to your help post
+  on Discord. Passwords, session tokens and keys are never in it.
+  If the game closes within a minute, crashes or does not start, the
+  launcher says so when you open it again (with the reason it can tell)
+  and offers "Save report"; on Linux "Debug the next game start" adds
+  Wine's debug output to the next start's log.
 
 Source code: Mezeporta-v{version}-source.zip on the same release page
 (https://github.com/EclipseKnight/Mezeporta/releases), and the git history of

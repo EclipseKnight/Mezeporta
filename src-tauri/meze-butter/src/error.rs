@@ -6,6 +6,8 @@ pub enum Error {
     Mutex,
     GlobalAlloc,
     Dll,
+    /// Hunsterverse (1.5.4-hv6): LoadLibrary failed (file name, Windows' reason).
+    DllLoad(String, String),
     FontMissing,
     FontBootstrap,
     S6ReceiveBufferSetup,
@@ -27,6 +29,7 @@ impl Display for Error {
             Self::Mutex => write!(f, "unable to create or free game mutexes"),
             Self::GlobalAlloc => write!(f, "unable to create or free game global alloc"),
             Self::Dll => write!(f, "unable to load or free mhfo dll"),
+            Self::DllLoad(name, why) => write!(f, "unable to load {name}: {why}"),
             Self::FontMissing => write!(f, "required S7K font file is missing"),
             Self::FontBootstrap => write!(f, "unable to prepare or register the S7K font"),
             Self::S6ReceiveBufferSetup => {

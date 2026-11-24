@@ -903,8 +903,18 @@ pub async fn patch(
         is_cache_complete_for_server(&game_folder, &target_server, target_has_manifest);
     let same_server = prev_server == target_server;
     let etag_matches = !local_etag.is_empty() && local_etag == target_etag;
+    // Hunsterverse (1.5.4-hv6): each patch run in the log.
+    info!(
+        "patch: {} from {} (etag {} -> {}, patched for {})",
+        target_server,
+        patcher_url,
+        if local_etag.is_empty() { "none" } else { &local_etag },
+        target_etag,
+        if prev_server.is_empty() { "none" } else { &prev_server }
+    );
 
     if same_server && etag_matches {
+        info!("patch: already installed");
         if let Some(dir) = active_file.parent() {
             let _ = fs::create_dir_all(dir);
         }
@@ -918,6 +928,7 @@ pub async fn patch(
     }
 
     if !same_server && etag_matches && target_has_manifest && target_has_cache {
+        info!("patch: switching back to the files kept for {target_server}");
         if !prev_server.is_empty() {
             send_event(&window, 0, 0, State::Restoring, 0);
             if let Err(e) = restore_server(&game_folder, &prev_server) {
@@ -1019,6 +1030,7 @@ pub async fn patch(
         warn!("failed to cache {}: {}", CLIENT_ETAG_FILE, e);
     }
     hv_patch::record_installed(&game_folder, &target_server, &patcher_url_for_record, &target_etag);
+    info!("patch: {target_etag} installed for {target_server}");
     hv_patch_cache::remember_installed(
         &game_folder,
         &target_server,

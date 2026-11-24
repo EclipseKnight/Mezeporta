@@ -30,11 +30,22 @@ SCENARIO:
            so far, a half file included, and recorded the patch as
            installed); the next login offers the patch again and installs it
            completely
+  report   (hv6) log files and the problem report, after "proton" and
+           "cancel" started the game: game.log has the stand-in Proton's
+           output and exit code; that "game" ended at once, so the launcher
+           opens with the early-exit message (its Save report, "Debug the
+           next game start", Close: noted in game.log); Settings, Advanced,
+           Save report writes Mezeporta/logs/problem-report-*.txt (system,
+           settings, last game start, game files, the logs of the earlier
+           runs with the game start) and opens that folder (the stand-in
+           xdg-open); the debug button shows on; the next start passes
+           WINEDEBUG to Proton; at most 5 launcher log files; the login's
+           password is in no file of the folder
   update   the update bar: a tampered download is refused, then the signed one
            is installed and the launcher restarts into it
 Prints "ok ..." per check; exits 1 at the first failure.
 
-Env: NEXT_VERSION  the version the update offers (default 1.5.4-hv5);
+Env: NEXT_VERSION  the version the update offers (default 1.5.4-hv7);
      NEW_VERSION   if set, the header must read "release ver. NEW_VERSION";
      SHOTS         if set, a folder for screenshots of the character page
                    (default window size and a small one), of the open Patch
@@ -51,7 +62,7 @@ import time
 import urllib.request
 
 DRIVER = "http://127.0.0.1:4444"
-NEXT_VERSION = os.environ.get("NEXT_VERSION", "1.5.4-hv5")
+NEXT_VERSION = os.environ.get("NEXT_VERSION", "1.5.4-hv7")
 ELEMENT = "element-6066-11e4-a52e-4f735466cecc"
 
 
@@ -620,6 +631,116 @@ def scenario_proton(game, state):
         set_wine_mode(game, before)
 
 
+def scenario_report(game, state):
+    logs = os.path.join(game, "Mezeporta", "logs")
+    read = lambda name: open(os.path.join(logs, name), encoding="utf-8", errors="replace").read()
+    game_log = read("game.log")
+    if "game start: " not in game_log or "game process ended, exit code 0" not in game_log:
+        fail("game.log has no start line or exit code: %r" % game_log[-600:])
+    ok("game.log: the start command and 'game process ended, exit code 0'")
+    browser_log = os.path.join(state, "browser-calls.log")
+    before = open(browser_log).read() if os.path.exists(browser_log) else ""
+    s = Session(os.path.join(game, "mezeporta-bin"))
+    try:
+        # hv6: the stand-in game ended at once, so the launcher says so.
+        title = s.wait("""const e = document.querySelector('.hv-panel h2');
+                          return e ? e.textContent.trim() : null;""", "the early-exit message", 30)
+        detail = s.js("return document.querySelector('.hv-panel .hv-mono').textContent.trim();")
+        if title != "The game closed right after it started" or "exit code 0" not in detail:
+            fail("early-exit message %r / %r" % (title, detail))
+        ok("early-exit message at start: %r (%s)" % (title, detail))
+        if os.environ.get("SHOTS"):
+            s.screenshot(os.path.join(os.environ["SHOTS"], "game-early-exit.png"))
+        s.wait(CLICK_TEXT, "the message's Debug button", 10, ".hv-panel button", "Debug the next game start")
+        s.wait(CLICK_TEXT, "the message's Save report button", 10, ".hv-panel button", "Save report")
+        saved = s.wait("""const e = document.querySelector('.hv-panel .hv-block');
+                          return e ? e.textContent.trim() : null;""", "the message's report path", 30)
+        if not os.path.basename(saved).startswith("problem-report-"):
+            fail("the message's Save report shows %r" % saved)
+        s.wait(CLICK_TEXT, "the message's Close button", 10, ".hv-panel button", "Close")
+        s.wait("return !document.querySelector('.hv-panel');", "the message to close", 10)
+        if "launcher: noted" not in read("game.log"):
+            fail("game.log does not say the message was seen")
+        ok("message: Save report wrote %s, debug launch set, Close noted it in game.log" % os.path.basename(saved))
+        login(s)
+        # Visible: the element is there (hidden) while the login still runs,
+        # whose end would switch the page away from Settings again.
+        s.wait("""const e = document.querySelector("[data-controller-node='character-start']");
+                  return !!(e && (e.offsetWidth || e.offsetHeight));""", "the character page", 90)
+        time.sleep(1)
+        s.wait(CLICK_TEXT.replace("e.textContent.trim().startsWith(text)", "true"), "the Settings button", 10,
+               "[data-controller-node='settings']", "")
+        s.wait(CLICK_TEXT.replace("e.textContent.trim().startsWith(text)", "true"), "the Advanced tab", 10,
+               "[data-controller-node='settings-nav-advanced']", "")
+        s.wait(CLICK_TEXT, "the Save report button", 20, "[data-controller-node='settings-hv-report-save']",
+               "Save report")
+        shown = s.wait("""const e = document.querySelector('.hv-report-path');
+                          return e ? e.textContent.trim() : null;""", "the report's path on the page", 30)
+        if os.environ.get("SHOTS"):
+            s.screenshot(os.path.join(os.environ["SHOTS"], "settings-problem-report.png"))
+        debug_label = s.js("""const e = document.querySelector("[data-controller-node='settings-hv-debug-launch']");
+                              return e ? e.textContent.trim() : null;""")
+        if not debug_label or not debug_label.endswith("\u2713"):
+            fail("Settings' debug button: %r (should be on)" % debug_label)
+        ok("Settings shows the debug launch on: %r" % debug_label)
+        report_path = shown
+        end = time.time() + 20
+        while time.time() < end:
+            if s.js("return !!document.querySelector(\"[data-controller-node='character-start']\")"):
+                if s.js("""const e = document.querySelector("[data-controller-node='character-start']");
+                           return !!(e.offsetWidth || e.offsetHeight);"""):
+                    break
+            s.js(CLICK_TEXT, "[data-controller-node='settings-nav-back'], [data-controller-node='settings']",
+                 "Go back")
+            time.sleep(1)
+        calls = os.path.join(state, "proton-calls.log")
+        before_calls = os.path.getsize(calls)
+        start_through_proton(s, state, "debug launch")
+        with open(calls) as f:
+            f.seek(before_calls)
+            chunk = f.read()
+        if "WINEDEBUG +timestamp,+pid,+tid,+seh,+loaddll" not in chunk:
+            fail("debug launch: Proton got %r" % [l for l in chunk.splitlines() if l.startswith("WINEDEBUG")])
+        if "(debug launch: WINEDEBUG=" not in read("game.log"):
+            fail("game.log does not mark the debug launch")
+        ok("debug launch: Proton got WINEDEBUG=+timestamp,+pid,+tid,+seh,+loaddll; game.log says so")
+    finally:
+        s.close()
+    shown = report_path
+    reports = sorted(n for n in os.listdir(logs) if n.startswith("problem-report-") and n.endswith(".txt"))
+    if not reports or os.path.basename(shown) != reports[-1]:
+        fail("report file %r, page shows %r" % (reports, shown))
+    text = read(reports[-1])
+    for want in ("== System\n", "Launcher: ", "env MEZEPORTA_PROTON_CMD: ", "== Launcher settings\n",
+                 "Wine prefix mode: ", "Server: Hunsterverse (127.0.0.1:", "== mezeporta.log", "login ok: ",
+                 "starting the game: ", "proton", "== game.log", "game process ended, exit code 0",
+                 "== Last game start (game.log)\n", "Verdict: ended early (within 60 s)", "== Game files in ",
+                 "mhfo-hd.dll: ", "Mezeporta/bin/meze-deps.exe: "):
+        if want not in text:
+            fail("report lacks %r" % want)
+    ok("report %s: system, settings, last game start, game files, launcher logs, game.log" % reports[-1])
+    # Two opens: the early-exit message's Save report, then Settings'.
+    end = time.time() + 10
+    opened = []
+    while time.time() < end:
+        if os.path.exists(browser_log):
+            opened = open(browser_log).read()[len(before):].split()
+            if len(opened) >= 2:
+                break
+        time.sleep(0.3)
+    if len(opened) != 2 or any(os.path.realpath(o) != os.path.realpath(logs) for o in opened):
+        fail("Save report (message, then Settings) opened %r, not the log folder twice" % opened)
+    ok("both Save report buttons opened the log folder (xdg-open %s)" % opened[-1])
+    launcher_logs = [n for n in os.listdir(logs) if n.startswith("mezeporta") and n.endswith(".log")]
+    if not 2 <= len(launcher_logs) <= 5:
+        fail("launcher log files: %r" % launcher_logs)
+    for name in os.listdir(logs):
+        content = read(name)
+        if "secret" in content:
+            fail("the password is in %s: %r" % (name, [l for l in content.splitlines() if "secret" in l][:3]))
+    ok("%d launcher log files (at most 5); the password is in none of %s" % (len(launcher_logs), sorted(os.listdir(logs))))
+
+
 CANCEL_FILE = "dat/zz-cancel-test.pac"
 ORIGINALS = {"mhfo-hd.dll": "original mhfo-hd\n", os.path.join("dat", "a.pac"): "original a.pac\n"}
 
@@ -854,7 +975,7 @@ def main():
         shots = os.path.abspath(sys.argv[4]) if len(sys.argv) > 4 else None
         return scenario_events(os.path.abspath(game), os.path.abspath(state), shots)
     {"patch": scenario_patch, "proton": scenario_proton, "cancel": scenario_cancel,
-     "update": scenario_update}[scenario](os.path.abspath(game), os.path.abspath(state))
+     "report": scenario_report, "update": scenario_update}[scenario](os.path.abspath(game), os.path.abspath(state))
 
 
 if __name__ == "__main__":

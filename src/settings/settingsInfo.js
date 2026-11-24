@@ -220,6 +220,13 @@ export const SETTINGS_INFO = Object.freeze({
     bodyKey: "settings-info-launcher-hardware-acceleration-body",
     bodyFallback: "Linux GPU rendering. Turn off only for display issues. Restart required.",
   },
+  "hv-problem-report": {
+    titleKey: "hv-report-label",
+    titleFallback: "Problem report",
+    bodyKey: "settings-info-hv-problem-report-body",
+    bodyFallback:
+      "Something does not work (login, patch, update, the game does not start)? Save report makes one text file with your system, the launcher's settings and its recent logs, and opens its folder; Copy report puts the same text on the clipboard. Attach it to your help post on Discord. Passwords, session tokens and keys are never in it. Linux and Steam Deck: \"Debug the next game start\" adds Wine's debug output to the next start's log (for a game that closes or crashes at once).",
+  },
   "hv-dpi-fix": {
     titleKey: "hv-dpi-fix-label",
     titleFallback: "Fix text scaling on high-DPI screens",

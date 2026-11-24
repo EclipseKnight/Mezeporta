@@ -3,7 +3,8 @@
 This branch (`hunsterverse` of github.com/EclipseKnight/Mezeporta, a fork of
 LilButter/Mezeporta v1.5.4, GPL-2.0) is the launcher our installers ship.
 Everything we add is marked "Hunsterverse" in comments; our own files are in
-this folder, `src-tauri/src/hv_*.rs` and `src/components/HunsterversePanel.vue`.
+this folder (including the Linux zip's `run-mezeporta.sh`, since hv6),
+`src-tauri/src/hv_*.rs` and `src/components/HunsterversePanel.vue`.
 
 | Version | Change |
 |---|---|
@@ -12,6 +13,7 @@ this folder, `src-tauri/src/hv_*.rs` and `src/components/HunsterversePanel.vue`.
 | 1.5.4-hv3 (2026-11-23) | The Patch button moved off the CAPCOM logo (classic: in the footer after "Online Players"; PS4 style: right of Settings), part of the launcher layout so it scales with the window; the header's "release ver." comes from `tauri.conf.json` (hv2 still said hv1); event badges from the website's event list (below); Proton on the Steam Deck (below) |
 | 1.5.4-hv4 (2026-11-23) | Downloaded patch files are kept per server (patch cache, below): switching Stable <-> pre-release takes them from there instead of downloading again. Cancelling a patch stops it (nothing moves into the game folder); on Windows the return from the game to the launcher starts a fresh launcher process (below); `Mezeporta-Linux.zip` stores `mezeporta-bin` and the `*.sh` files as executable (below) |
 | 1.5.4-hv5 (2026-11-23) | A self-update that needs administrator rights (launcher in Program Files, or files an administrator created) asks for them with the UAC prompt on Windows instead of failing with "access is denied"; clear messages when the prompt is declined, when it is still denied, on Linux, and when patching a protected game folder (below) |
+| 1.5.4-hv6 (built 2026-11-24, not published) | Includes hv5. Log files on disk (`Mezeporta/logs`, the current run and the 4 before), what the game start, login, patch and self-update do, the game's own output and exit code on Linux / Steam Deck, and a "Problem report" (Settings, Advanced: Save report, Copy report) for Discord; our own `run-mezeporta.sh` that logs too. `tauri-plugin-log` replaced by `hv_log.rs` ("Logs and problem reports", below). A game that closes within 60 s, crashes or does not start ("instant crash on launch"): its exit code in words (Windows NTSTATUS, Linux signals and Wine's codes; Windows too now, through a small watcher process), Wine's error lines, a message at the next launcher start offering "Save report", an optional debug launch on Linux (`WINEDEBUG=+seh,+loaddll`), and in the report the game files' sha256, hvmods' crash files and Windows Error Reporting entries (`hv_crash.rs`, below) |
 
 ## Client patch choice (hv2)
 
@@ -329,6 +331,207 @@ wine reg: No such file or directory"). Now:
   check already wanted only the Proton command (no wineserver, winetricks);
   the portable prefix install stays Wine only.
 
+## Logs and problem reports (hv6, `hv_log.rs`)
+
+Up to hv5 the launcher logged to stdout and to the webview only
+(`tauri-plugin-log`; nothing in the frontend listened), so a player's
+machine kept nothing. hv6 replaces the plugin with its own logger: every
+line goes to stdout as before and to a file.
+
+### Where the files are
+
+| System | Folder |
+|---|---|
+| Linux, Steam Deck | `<game folder>/Mezeporta/logs/`, beside `mezeporta-bin` and `Mezeporta/config.json` (installer default `~/Games/MHFZ/Mezeporta/logs/`). On the Deck the launcher runs in the Flatpak runtime sandbox, which shares exactly that folder, so the files are on the real disk. If it cannot be written: `$XDG_STATE_HOME/Mezeporta/logs` (else `~/.local/state/Mezeporta/logs`), then `/tmp/Mezeporta-logs` |
+| Windows | `<launcher folder>\Mezeporta\logs\` (the folder the launcher runs in, where `Mezeporta\config.json` is). A launcher under Program Files writes to `%LOCALAPPDATA%\Mezeporta\logs\` instead: there UAC file virtualization would hide the files in `VirtualStore` (hv5 notes) |
+
+The first lines of each run name the folder (`log folder: ...`), and the
+report shows it.
+
+| File | What |
+|---|---|
+| `mezeporta.log` | this run; `mezeporta.1.log` .. `mezeporta.4.log` the runs before. A run that passes 1 MiB moves on to a new file, so the files stay under about 5 MiB together. The file opens after the single-instance check (a second launcher must not move the running one's file aside); lines from before are written then |
+| `game.log`, `game.1.log` | Each game start (hv6 crash part: "Game that closes or crashes at once", below). Linux / Steam Deck: the game's stdout and stderr (Wine or Proton and `meze-deps.exe`), from the start command to `== ... game process ended, exit code N, after S s`. Upstream threw this output away. The launcher closes once the game runs, so `/bin/sh -c '"$@"; ...'` around the game command writes the exit code (same command, arguments and stdin otherwise; only when that command exists and is executable, so a missing Wine or Proton still fails at once with the launcher's error; without `/bin/sh` the game starts as before, without the exit code). Not capped within one game session (the launcher is closed meanwhile); each game start begins a new file. The game's environment is unchanged (Proton sets `WINEDEBUG=-all` itself unless `PROTON_LOG`), except in a debug launch. Windows: the game runs inside the launcher process (meze-butter), so the file has only the start line and the end line (below) |
+| `run-mezeporta.log`, `run-mezeporta.1.log` | Linux: written by `run-mezeporta.sh` (below) |
+| `problem-report-<UTC time>.txt` | the reports (the newest 3 are kept) |
+
+### What is in them
+
+- Each line: `2026-11-24 10:15:03.123 UTC INFO  [module] message`. Our
+  modules from debug up, libraries from warn up. A panic is logged too.
+- At start: launcher version and file, working and log folder; OS and
+  version (Linux: `/etc/os-release`; in a Flatpak sandbox the host's
+  `/run/host/os-release`, i.e. SteamOS and its build, plus the runtime),
+  kernel, device (`Valve Jupiter`/`Galileo` = Steam Deck); Wine found on PATH
+  and its `wine --version`; the Proton command (`MEZEPORTA_PROTON_CMD`,
+  `PROTON_CMD`) with Proton's own `version` file, also through the
+  installer's `proton-host.sh`; the Proton prefix (`$STEAM_COMPAT_DATA_PATH/pfx`);
+  Windows: version and build from the registry, Wine's version when the
+  Windows launcher runs under Wine/Proton (`wine_get_version`), whether the
+  launcher's folder is writable. Environment: only a fixed list
+  (`ENV_NAMES`: Wine and Proton commands, `WINEPREFIX`, `WINEESYNC`/`FSYNC`,
+  `WINEDEBUG`, `WINEDLLOVERRIDES`, `SteamDeck`, `SteamAppId`, display and
+  session variables, `GDK_BACKEND`, the WebKit switches, `FLATPAK_ID`) and
+  every `PROTON_*`, `STEAM_COMPAT_*`, `DXVK_*`, `VKD3D_*`; `LD_PRELOAD` only
+  as "(set)".
+- Login: server, mode and game folder; the outcome (characters, patch
+  server, whether a patch is offered) or the error. Patch: each run (server,
+  URL, ETag from and to, the server patched before), cache use, cancel,
+  installed, every error. Patch choice (channel set, API errors). Self-update:
+  check (latest version or error), install, the administrator step,
+  restart, errors.
+- Game start: the exact command (`".../proton" "run" ".../meze-deps.exe"
+  "--stdin-b64"`), runtime, folder, what the launcher sets (`WINEPREFIX`,
+  x11 variables, `WINEESYNC=0`/`WINEFSYNC=0`, `STEAM_COMPAT_DATA_PATH`), game
+  version, character id, server; the process id; on Windows the meze-butter
+  start and the exit code. At the next start: the last game start's result
+  (`last game start (...): the game ended after 3 s, exit code ...`, a
+  warning with Wine's error lines when it ended early or crashed).
+- What the player is shown: every message of the launcher's message box
+  (`logMessage` in `store.js`, `[ui]` lines).
+
+### What is never in them
+
+- Passwords, the session token, the account API token, keys: the game's
+  start data (which holds the token and password) goes to the game's stdin
+  only and is never logged; the username is not logged either.
+- As a second line of defence every line and the report go through
+  `hv_log::redact`: the value after any field name containing `password`,
+  `passwd`, `secret`, `token`, `authorization`, `apikey`/`api_key`,
+  `private_key`, `cookie`, `session` or `credential` (`=`, `:`, JSON, Debug's
+  `Some("...")`), `Bearer`/`Basic` credentials, JWTs and base64 runs of 160+
+  characters become `[redacted]`.
+- The home folder: `$HOME` / `%USERPROFILE%` is shown as `~` (paths under
+  it keep the part after the home folder, e.g. `~/Games/MHFZ`).
+  `run-mezeporta.log` is written by the shell and may hold the full path on
+  disk; the report redacts it when it reads the file.
+
+### Problem report
+
+Settings, Advanced (both looks; `SettingsList.vue`), "Problem report":
+
+- **Save report** writes `problem-report-<time>.txt` into the log folder,
+  opens that folder (Windows: Explorer with the file selected; Linux:
+  `xdg-open`, which in the Deck's sandbox may not open anything) and shows
+  the file's path.
+- **Copy report** puts the same text on the clipboard; pasted into a Discord
+  message it becomes a `message.txt` attachment.
+
+The report (`hv_log::build_report`): system (as at start, plus the Wine
+version), the launcher's settings (look, language, server and its ports,
+server mode, game folder, game version, Wine prefix mode and path,
+controller DLLs, hardware acceleration, DPI fix, Dev Mode, logged in and the
+patch server, patch offered, the active server, the installed patch record), the
+crash part (next section: last game start, game files, hvmods' crash files,
+Windows Error Reporting), then the end of each log: `mezeporta.log` and `.1` (1500 lines each), `.2`
+(500), `game.log` (400) and `.1` (200), `run-mezeporta.log` (300) and `.1`
+(150). The run that failed is usually `mezeporta.1.log` (the player opens
+the launcher again to make the report). Strings in English and Japanese
+(`hv-report-*`).
+
+### Game that closes or crashes at once (hv6, `hv_crash.rs`)
+
+The owner's main question for hv6: why the game crashes at once on launch
+(Steam Deck and others). The launcher now catches that case:
+
+- **End line in `game.log`.** Linux: `/bin/sh` around the game command
+  writes `== <time> UTC game process ended, exit code N, after S s` (the
+  launcher has closed by then). Windows: the game runs inside the launcher
+  process, so before it starts the launcher starts itself again as a small
+  watcher (`Mezeporta.exe --hv-game-watch <pid> <start> <log folder>`, no
+  window, handled first thing in `main`, no single-instance lock, no log
+  rotation). It waits for the launcher process and writes the full exit code
+  (`exit code 3221225477 (0xC0000005), after 1 s`), also when the game
+  crashes the process or ends it with ExitProcess. When the game returns to
+  the launcher the launcher writes `game returned to the launcher, exit code
+  102, ...` first; when meze-butter cannot start it, `game did not start:
+  <why>` (meze-butter now keeps Windows' reason when `mhfo-hd.dll` /
+  `mhfo.dll` does not load, e.g. `The specified module could not be found.
+  (HRESULT 0x8007007E)`: a DLL it needs is missing).
+- **Exit codes in words** (`describe_code`): Windows NTSTATUS / exception
+  codes (0xC0000005 access violation, 0xC0000135 DLL not found, 0xC000007B
+  bad image, 0xC0000142 DLL initialization failed, 0xC0000409 stack buffer
+  overrun, 0xC00000FD stack overflow, 0xC0000374 heap corruption, 0xE06D7363
+  C++ exception, ...). Linux: 126/127 (not executable / not found), 128+n
+  signals (SIGSEGV, SIGABRT, SIGKILL: out of memory, ...), meze-deps.exe's
+  own codes 1-6, and since Wine passes on only the last byte of a Windows
+  code, the codes that byte may stand for (`5 (maybe: ...; or 0xC0000005
+  access violation ...)`). Wine's error lines from the output (`err:module:`,
+  `err:seh:`, `Unhandled page fault ...`, `wine: could not load ...`,
+  meze-deps' errors; up to 20) are picked out.
+- **The rule** (`verdict`): ended within 60 s (`EARLY_EXIT_SECS`) = early;
+  a crash code at any time (Windows `0xC...` except 0xC000013A Ctrl+C,
+  breakpoint, C++ exception; Linux SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE,
+  SIGKILL, SIGSEGV) = crash; `game did not start` = not started. Exit code
+  102 (back to the launcher) is never early. No end line (game still
+  running, or killed together with its shell) = nothing to say.
+- **Message at the next start** (`HunsterversePanel.vue`, both looks):
+  "The game closed right after it started" / "The game crashed" / "The game
+  did not start", the result line (exit code in words, the first Wine error
+  line), and Save report, Copy report, on Linux "Debug the next game start",
+  Close. Any button appends `== ... launcher: noted` to `game.log`, so it
+  shows once. English and Japanese (`hv-crash-*`).
+- **Debug launch** (Linux: Wine or Proton): from the message or Settings,
+  Advanced, Problem report, "Debug the next game start" (or
+  `MEZEPORTA_GAME_DEBUG=1` for every start). The next game start gets
+  `WINEDEBUG=+timestamp,+pid,+tid,+seh,+loaddll` (every exception and DLL
+  load, with times and threads) into `game.log`, and its start line says
+  `(debug launch: ...)`. Proton keeps a `WINEDEBUG` that is set; the
+  installer's `proton-host.sh` forwards it. `PROTON_LOG` is not set: Proton
+  would then write `~/steam-<id>.log`, which the Deck's launcher sandbox
+  cannot read. Plain starts stay as they were. The setting lasts for one
+  start and is not saved.
+- **In the report**: "Last game start (game.log)" (start time, result,
+  verdict, Wine's error lines); "Game files in <folder>": `mhf.exe`,
+  `mhfo-hd.dll`, `mhfo.dll`, `hvmods.dll`, `mhf.ini`,
+  `Mezeporta/bin/meze-deps.exe` with size, time and sha256, or MISSING (the
+  DLLs carry no version resource we could rely on; the hash names the patch
+  version against the patch server's `/check`); hvmods' own files in the
+  game folder (hvmhfz_re `mods/hvmods`: its crash catcher writes
+  `hvcrash-<UTC time>.txt` and `hvdiag.txt` before uploading the crash at the
+  next game start from `hvsend-crash.txt`): the newest 5 crash file names,
+  the newest one (250 lines), `hvsend-crash.txt`, `hvmods.log` (150),
+  `hvdiag.txt` (200); Windows: Windows Error Reporting entries
+  (`%LOCALAPPDATA%` and `%ProgramData%\Microsoft\Windows\WER\ReportArchive`
+  and `ReportQueue`, `AppCrash_Mezeporta.exe_*` and `AppCrash_mhf.exe_*`: the
+  `Report.wer` fields, fault module, exception code in words, offset) and
+  crash dumps in `%LOCALAPPDATA%\CrashDumps` (name and size only, not
+  attached), newest 5.
+
+### `run-mezeporta.sh` (Linux)
+
+Every Linux start script runs it (the installer's `run-hunsterverse.sh`
+too). Ours (in this folder; `pack_launcher_zip.py` puts it into
+`Mezeporta-Linux.zip` instead of upstream's, `build-release.sh` checks)
+writes `Mezeporta/logs/run-mezeporta.log` (the start before as `.1`): the
+time, kernel, OS (host and sandbox), Flatpak runtime, display and Proton
+variables, then everything the launcher prints. So a launcher that never
+opens (`libwebkit2gtk-4.1.so.0: cannot open shared object file`, "cannot
+open display", a crash) still leaves a trace. Not in a terminal it `exec`s
+the launcher with its output appended (same process as before: on the Deck
+the launcher stays the sandbox's main process) and sets
+`MEZEPORTA_LOG_TO_STDOUT=0`, so the launcher prints only the lines from
+before its own file is open; in a terminal it shows the output too (`tee`)
+and adds the exit code. If the folder cannot be written it starts the
+launcher as before.
+
+The self-update replaces only the binary: players get this script from the
+zips, i.e. the installer (run it again) or a by-hand unzip. The launcher's
+own log works without it.
+
+Not covered: the installer's `run-hunsterverse.sh` itself (Flatpak runtime
+missing, `flatpak run` failing) runs before this script; that is the
+installer's part (`hvmhfz_ops/player-installer`).
+
+### Sending it to us later
+
+The REST API has `POST /api/account/diagnostics` (website sign-in; the
+launcher already signs in to the same API for the patch choice). It takes
+the game's `hvdiag.txt` / `hvcrash-*.txt` and `*.log` files, but explains a
+`.log` as an `hvmods.log`, and keeps 256 KB. A launcher upload ("Send report
+to Hunsterverse") needs an API change first: a launcher report kind (its own
+explainer or none, area `launcher`). Not done in hv6.
+
 ## Making a release
 
 1. Bump the version in `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`
@@ -338,8 +541,8 @@ wine reg: No such file or directory"). Now:
    20-30 minutes on mhfz-dev from scratch). Output in
    `/root/work/mezeporta-release/out/`.
 3. `hunsterverse/test-e2e.sh` with this build and one with a higher version
-   (see the script's header), and `cargo test --target x86_64-unknown-linux-gnu hv`
-   in `src-tauri`.
+   (see the script's header), `cargo test --target x86_64-unknown-linux-gnu hv`
+   in `src-tauri`, and `bash hunsterverse/tests/run-mezeporta.test.sh`.
 4. Commit, tag `v<version>`, push (owner's go: public), then a GitHub release
    on the tag with **every** file of `out/`. Upload `latest.json` last: from
    then on launchers see the update. Do not mark it pre-release (players would
@@ -392,3 +595,30 @@ launcher updates; launchers already updated stay on it until a newer release.
   again.)
 - `node --test hunsterverse/tests/*.test.mjs`: the event badge rules
   (`src/hvEvents.js`).
+- hv6, in the `hv` tests above (`hv_log`): redaction (passwords, tokens,
+  bearer and basic credentials, Debug `Some("...")`, cookies, private keys,
+  JWTs, base64 blobs, the home folder; words without a value stay), the line
+  format and UTC time, rotation (6 runs keep 5 files; a run past the size
+  limit moves on, total bounded), the report (sections, logs, no password,
+  newest 3 kept), tails, the Program Files check.
+- hv6 crash part, in the same `hv` tests (`hv_crash`): the Windows codes
+  in words, the Linux statuses (signals, 126/127, Wine's last byte), the
+  early-exit rule (60 s, crash codes at any time, 102, Ctrl+C, no end
+  line), `game.log` parsing (Linux with Wine error lines and a debug launch,
+  Windows watcher line, returned then watcher, did not start, still
+  running, noted), the real `/bin/sh` wrapper (exit 5 after 0 s: early;
+  SIGSEGV: 139, crash), game files with sha256 and MISSING, hvmods' crash
+  files, a UTF-16 `Report.wer` and a crash dump.
+- `bash hunsterverse/tests/run-mezeporta.test.sh`: `run-mezeporta.sh` with a
+  stand-in launcher: not a terminal (output and errors in the log, exit code
+  kept), rotation, a terminal (`script`), no writable log folder.
+- `test-e2e.sh` scenario `report` (hv6), after `proton` and `cancel` started
+  the game: `game.log` has the stand-in Proton's start and exit code 0;
+  Settings, Advanced, Save report writes the report (system, settings, the
+  earlier runs' game start, `game.log`), opens the log folder (stand-in
+  `xdg-open`) and shows the path; at most 5 launcher log files; the login's
+  password in no file of the folder. The stand-in game ends at once, so the
+  scenario also checks the early-exit message at the next start (title,
+  exit code, its Save report, Close noted in `game.log`), the report's
+  "Last game start" and "Game files", and that "Debug the next game start"
+  reaches the stand-in Proton as `WINEDEBUG`.

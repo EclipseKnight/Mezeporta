@@ -13,14 +13,21 @@
     the account setting the website's Account page edits (same API, src-tauri/src/
     hv_patch.rs); after a change the launcher logs in again, so the normal patch
     dialog downloads the chosen patch (or puts the stable one back).
+
+  - Game crash (1.5.4-hv6, src-tauri/src/hv_crash.rs): at start, when the last game
+    start ended within 60 s, crashed or did not start (hv_last_game_exit), a message
+    offers "Save report" / "Copy report" (the problem report, hv_log.rs) and on Linux
+    "Debug the next start" (Wine's debug output into game.log). It shows once.
 -->
 <script setup>
-import { ref, computed, watch, watchEffect, onMounted } from "vue";
+import { ref, computed, watch, watchEffect, onMounted, getCurrentInstance } from "vue";
 import { invoke } from "@tauri-apps/api";
 import { open } from "@tauri-apps/api/shell";
+import { writeText } from "@tauri-apps/api/clipboard";
 import { storeMut, doLogin } from "../store";
 import { CHARACTERS_PAGE } from "../common";
 import { hvPatchButton } from "./hvPatchButton";
+import { hvDebugLaunch, setHvDebugLaunch } from "./hvDebugLaunch";
 
 // --- launcher update -------------------------------------------------------
 const update = ref(null); // UpdateInfo when one is available
@@ -57,6 +64,74 @@ const updateNotes = computed(() => {
 
 onMounted(() => {
   window.setTimeout(checkUpdate, 1500);
+  checkGameExit();
+});
+
+// --- the last game start (hv6) ---------------------------------------------
+const gameExit = ref(null); // HvGameExit when the last start ended badly
+const crashBusy = ref(false);
+const crashStatus = ref("");
+const crashPath = ref("");
+const crashError = ref(false);
+const debugOn = computed(() => hvDebugLaunch.on);
+
+async function checkGameExit() {
+  try {
+    gameExit.value = await invoke("hv_last_game_exit");
+  } catch (_e) {
+    gameExit.value = null;
+  }
+}
+
+function noteGameExit() {
+  invoke("hv_game_exit_noted").catch(() => {});
+}
+
+const vueInstance = getCurrentInstance();
+function t(key, fallback) {
+  return String(vueInstance?.proxy?.$t?.(key, fallback) ?? fallback);
+}
+
+async function crashReport(copy) {
+  if (crashBusy.value) return;
+  crashBusy.value = true;
+  crashError.value = false;
+  noteGameExit();
+  try {
+    const report = await invoke("hv_problem_report", { openFolder: !copy });
+    crashPath.value = report.path || report.folder || "";
+    if (copy) {
+      await writeText(report.text);
+      crashStatus.value = t("hv-report-copied", "Report copied. Paste it into your help post on Discord (it becomes a file).");
+    } else if (report.path) {
+      crashStatus.value = t("hv-report-saved", "Report saved. Attach this file to your help post on Discord:");
+    } else {
+      crashError.value = true;
+      crashStatus.value = t("hv-report-not-saved", "The report could not be saved. Use Copy report instead.");
+    }
+  } catch (e) {
+    crashError.value = true;
+    crashStatus.value = `${t("hv-report-failed", "Could not make the report")}: ${e}`;
+  } finally {
+    crashBusy.value = false;
+  }
+}
+
+async function crashDebug() {
+  noteGameExit();
+  await setHvDebugLaunch(true);
+}
+
+function closeGameExit() {
+  noteGameExit();
+  gameExit.value = null;
+}
+
+const crashTitleKey = computed(() => {
+  const kind = gameExit.value?.kind;
+  if (kind === "crash") return ["hv-crash-title-crash", "The game crashed"];
+  if (kind === "notStarted") return ["hv-crash-title-not-started", "The game did not start"];
+  return ["hv-crash-title-early", "The game closed right after it started"];
 });
 
 // --- client patch ----------------------------------------------------------
@@ -219,6 +294,52 @@ function isChosen(channel) {
           {{ updateBusy ? "Downloading..." : "Update and restart" }}
         </button>
         <button class="hv-btn" :disabled="updateBusy" @click="updateHidden = true">Later</button>
+      </div>
+    </div>
+
+    <div v-if="gameExit" class="hv-backdrop">
+      <div class="hv-panel" role="dialog" :aria-label="$t(crashTitleKey[0], crashTitleKey[1])">
+        <h2>{{ $t(crashTitleKey[0], crashTitleKey[1]) }}</h2>
+        <p class="hv-mono">{{ gameExit.detail }}</p>
+        <p>
+          {{ $t("hv-crash-body", "Save a problem report and attach it to your help post on Discord, so we can see why.") }}
+        </p>
+        <p v-if="gameExit.wasDebug" class="hv-muted">
+          {{ $t("hv-crash-debug-was", "That start was a debug launch: its Wine output is in the report.") }}
+        </p>
+        <div class="hv-actions hv-wrap">
+          <button
+            class="hv-btn hv-primary"
+            data-controller-clickable="true"
+            :disabled="crashBusy"
+            @click="crashReport(false)"
+          >
+            {{ $t("hv-report-save-button", "Save report") }}
+          </button>
+          <button class="hv-btn" data-controller-clickable="true" :disabled="crashBusy" @click="crashReport(true)">
+            {{ $t("hv-report-copy-button", "Copy report") }}
+          </button>
+          <button
+            v-if="gameExit.canDebug && !gameExit.wasDebug"
+            class="hv-btn"
+            :class="{ 'hv-on': debugOn }"
+            data-controller-clickable="true"
+            :disabled="crashBusy || debugOn"
+            @click="crashDebug"
+          >
+            {{ $t("hv-debug-launch-button", "Debug the next game start") }}
+          </button>
+          <button class="hv-btn" data-controller-clickable="true" :disabled="crashBusy" @click="closeGameExit">
+            {{ $t("hv-close-button", "Close") }}
+          </button>
+        </div>
+        <p v-if="debugOn" class="hv-muted">
+          {{ $t("hv-debug-launch-on", "The next game start writes Wine's debug output into the log. Start the game again, then save a new report.") }}
+        </p>
+        <p v-if="crashStatus" :class="crashError ? 'hv-error' : 'hv-muted'">
+          {{ crashStatus }}
+          <span v-if="crashPath" class="hv-mono hv-block">{{ crashPath }}</span>
+        </p>
       </div>
     </div>
 
@@ -399,6 +520,21 @@ function isChosen(channel) {
 }
 .hv-end {
   justify-content: flex-end;
+}
+.hv-wrap {
+  flex-wrap: wrap;
+}
+.hv-panel p {
+  margin: 6px 0;
+}
+.hv-mono {
+  font-family: monospace;
+  word-break: break-word;
+  user-select: text;
+}
+.hv-block {
+  display: block;
+  margin-top: 4px;
 }
 .hv-link {
   color: #f2c14e;

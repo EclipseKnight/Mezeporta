@@ -11,8 +11,10 @@ mod altclient_stats;
 mod cli;
 mod config;
 mod endpoint;
+mod hv_crash;
 mod hv_dpi;
 mod hv_events;
+mod hv_log;
 mod hv_patch;
 mod hv_patch_cache;
 mod hv_proton;
@@ -62,7 +64,6 @@ use std::{
 use store::StoreHelper;
 use tauri::utils::config::WindowConfig;
 use tauri::{async_runtime::Mutex, AppHandle, Manager, PhysicalSize, Window, WindowBuilder};
-use tauri_plugin_log::LogTarget;
 use tauri_plugin_store::StoreBuilder;
 use tokio_util::sync::CancellationToken;
 use user::{UserData, UserManager};
@@ -1605,6 +1606,30 @@ impl ResolvedWineRuntime {
         }
     }
 
+    /// Hunsterverse (1.5.4-hv6): what `apply_env` sets, for the log.
+    fn describe_env(&self) -> String {
+        let mut parts = vec![match self.wine_prefix.as_ref() {
+            Some(prefix) => format!("WINEPREFIX={}", prefix.display()),
+            None => "WINEPREFIX unset".to_string(),
+        }];
+        if std::env::var_os("DISPLAY").is_some() {
+            parts.push("x11 (GDK_BACKEND, WINIT_UNIX_BACKEND, SDL_VIDEODRIVER; WAYLAND_DISPLAY removed)".into());
+        }
+        if self.apply_esync_fallback {
+            parts.push("WINEESYNC=0".into());
+        }
+        if self.apply_fsync_fallback {
+            parts.push("WINEFSYNC=0".into());
+        }
+        if self.kind == WineRuntimeKind::Proton {
+            parts.push(format!(
+                "STEAM_COMPAT_DATA_PATH={}",
+                std::env::var("STEAM_COMPAT_DATA_PATH").unwrap_or_else(|_| "(unset)".into())
+            ));
+        }
+        parts.join(", ")
+    }
+
     fn program_name(&self) -> &'static str {
         match self.kind {
             WineRuntimeKind::Wine => "wine",
@@ -2801,7 +2826,46 @@ pub(crate) fn run_mhf(
     #[cfg(windows)]
     {
         let _ = (game_root, launcher_prefs, wait_for_exit, app_handle);
-        return mhf_iel::run(config).map_err(|e| format!("meze-butter error: {e}"));
+        let folder = config
+            .mhf_folder
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(launcher folder)".into());
+        info!(
+            "starting the game in the launcher process (meze-butter): folder {}, version {:?}, character {}, server {}:{}",
+            folder,
+            config.version,
+            config.char_id,
+            config.server_host,
+            config.server_port
+        );
+        // Hunsterverse (1.5.4-hv6): game.log gets this start and its end, from
+        // the watcher when the game ends this process (crash, ExitProcess),
+        // else from here (hv_crash.rs).
+        let started = SystemTime::now();
+        let log_dir = hv_log::game_output_file(&format!(
+            "game start: in the launcher process (meze-butter) in {folder}"
+        ))
+        .and(hv_log::log_dir());
+        if let Some(dir) = &log_dir {
+            hv_crash::spawn_watcher(dir, started);
+        }
+        let secs = || started.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+        let result = mhf_iel::run(config);
+        match (&result, &log_dir) {
+            (Ok(code), Some(dir)) => {
+                info!("the game returned exit code {code} after {} s", secs());
+                hv_crash::append_game_line(dir, &hv_crash::returned_text(*code as i64, secs()));
+            }
+            (Err(e), Some(dir)) => {
+                hv_crash::append_game_line(dir, &hv_crash::not_started_text(&e.to_string(), secs()))
+            }
+            _ => {}
+        }
+        return result.map_err(|e| {
+            error!("the game did not start: meze-butter error: {e}");
+            format!("meze-butter error: {e}")
+        });
     }
 
     #[cfg(not(windows))]
@@ -2825,27 +2889,94 @@ pub(crate) fn run_mhf(
             .map_err(|e| format!("failed to serialize launch config: {e}"))?;
         let payload_b64 = base64::engine::general_purpose::STANDARD.encode(payload);
 
-        let mut command = Command::new(&runtime.wine_command);
+        // Hunsterverse (1.5.4-hv6): what starts the game goes into the log, and
+        // its output into game.log (it was thrown away); `sh` adds the exit
+        // code there, since the launcher closes while the game runs.
+        let folder = config.mhf_folder.clone().unwrap_or_else(|| game_root.clone());
+        let mut shown = vec![runtime.wine_command.display().to_string()];
+        if runtime.kind == WineRuntimeKind::Proton {
+            shown.push("run".into());
+        }
+        shown.push(helper_path.display().to_string());
+        shown.push("--stdin-b64".into());
+        let shown = shown
+            .iter()
+            .map(|a| format!("{a:?}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        info!(
+            "starting the game: {} (runtime {}, folder {}, {}, version {:?}, character {}, server {}:{})",
+            shown,
+            runtime.program_name(),
+            folder.display(),
+            runtime.describe_env(),
+            config.version,
+            config.char_id,
+            config.server_host,
+            config.server_port
+        );
+        // A debug launch (hv_crash.rs): Wine's exceptions and DLL loads too.
+        let debug = hv_crash::take_debug_launch();
+        if debug {
+            info!("debug launch: WINEDEBUG={}", hv_crash::DEBUG_WINEDEBUG);
+        }
+        let game_log = hv_log::game_output_file(&format!(
+            "game start: {shown} in {}{}",
+            folder.display(),
+            if debug {
+                format!(" (debug launch: WINEDEBUG={})", hv_crash::DEBUG_WINEDEBUG)
+            } else {
+                String::new()
+            }
+        ));
+        // Only around a command that can run: a missing one must still fail
+        // here (the launcher shows the error) instead of inside `sh`.
+        let exit_wrapper = Path::new("/bin/sh");
+        let runnable = hv_log::find_program(&runtime.wine_command).is_some_and(|p| {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        });
+        let mut command = match &game_log {
+            Some(_) if runnable && exit_wrapper.is_file() => {
+                let mut c = Command::new(exit_wrapper);
+                c.arg("-c")
+                    .arg(hv_crash::GAME_EXIT_CODE_SCRIPT)
+                    .arg("mezeporta-game")
+                    .arg(&runtime.wine_command);
+                c
+            }
+            _ => Command::new(&runtime.wine_command),
+        };
         runtime.apply_env(&mut command);
+        if debug {
+            command.env("WINEDEBUG", hv_crash::DEBUG_WINEDEBUG);
+        }
         runtime.append_runtime_prefix_args(&mut command);
+        let (stdout, stderr) = match game_log.as_ref().and_then(|f| Some((f.try_clone().ok()?, f.try_clone().ok()?))) {
+            Some((out, err)) => (Stdio::from(out), Stdio::from(err)),
+            None if wait_for_exit => (Stdio::inherit(), Stdio::inherit()),
+            None => (Stdio::null(), Stdio::null()),
+        };
 
         let mut child = command
             .arg(&helper_path)
             .arg("--stdin-b64")
             .stdin(Stdio::piped())
-            .stdout(if wait_for_exit {
-                Stdio::inherit()
-            } else {
-                Stdio::null()
-            })
-            .stderr(if wait_for_exit {
-                Stdio::inherit()
-            } else {
-                Stdio::null()
-            })
-            .current_dir(config.mhf_folder.as_ref().unwrap_or(&game_root))
+            .stdout(stdout)
+            .stderr(stderr)
+            .current_dir(&folder)
             .spawn()
-            .map_err(|e| format!("failed to launch {}: {e}", runtime.program_name()))?;
+            .map_err(|e| {
+                error!("the game did not start: {} could not be run: {e}", runtime.program_name());
+                if let Some(dir) = game_log.as_ref().and(hv_log::log_dir()) {
+                    hv_crash::append_game_line(
+                        &dir,
+                        &hv_crash::not_started_text(&format!("{} could not be run: {e}", runtime.program_name()), 0),
+                    );
+                }
+                format!("failed to launch {}: {e}", runtime.program_name())
+            })?;
+        info!("game process started (pid {})", child.id());
 
         if let Some(stdin) = child.stdin.as_mut() {
             stdin
@@ -2861,10 +2992,12 @@ pub(crate) fn run_mhf(
         let status = child
             .wait()
             .map_err(|e| format!("failed to wait on helper: {e}"))?;
+        info!("game process ended: {status}");
         kill_wineserver_with_env(&runtime);
         return Ok(status.code().unwrap_or(1) as isize);
     }
 }
+
 
 #[cfg(not(windows))]
 fn build_launch_bundle(
@@ -4166,6 +4299,17 @@ async fn auth(
         }
     };
 
+    {
+        let state_sync = state.state_sync.lock().await;
+        let endpoint = &state_sync.current_endpoint;
+        info!(
+            "login to {} ({}, mode {}, game folder {})",
+            endpoint.name,
+            endpoint.server_key(),
+            server_mode,
+            state_sync.effective_folder().display()
+        );
+    }
     let mut auth_resp = if server_mode == SERVER_MODE_SIGNV1 {
         // Signv1 auth uses a TCP binary protocol with Blowfish encryption
         let (host, port, game_version) = {
@@ -4684,7 +4828,7 @@ async fn login(
             &password,
         )
     };
-    auth(state, username, password, remember_me, auth_req).await
+    hv_log_auth(auth(state, username, password, remember_me, auth_req).await)
 }
 
 #[tauri::command]
@@ -4709,7 +4853,21 @@ async fn register(
             &password,
         )
     };
-    auth(state, username, password, remember_me, auth_req).await
+    hv_log_auth(auth(state, username, password, remember_me, auth_req).await)
+}
+
+/// Hunsterverse (1.5.4-hv6): the login's outcome in the log.
+fn hv_log_auth(result: Result<AuthPayload, String>) -> Result<AuthPayload, String> {
+    match &result {
+        Ok(payload) => info!(
+            "login ok: {} characters, patch server {}, patch to install: {}",
+            payload.response.characters.len(),
+            if payload.response.patch_server.is_empty() { "(none)" } else { &payload.response.patch_server },
+            payload.has_patch
+        ),
+        Err(e) => warn!("login failed: {e}"),
+    }
+    result
 }
 
 async fn reauth(state: &mut tauri::State<'_, TauriState>) -> Result<(), String> {
@@ -5303,7 +5461,10 @@ async fn hv_patch_status(state: tauri::State<'_, TauriState>) -> Result<HvPatchS
             }
             status.api = answer;
         }
-        Err(e) => status.error = e,
+        Err(e) => {
+            warn!("patch panel: the account API did not answer: {e}");
+            status.error = e
+        }
     }
     Ok(status)
 }
@@ -5319,8 +5480,9 @@ async fn hv_set_patch_channel(
     }
     let host = state.state_sync.lock().await.current_endpoint.host();
     let api = hv_patch::account_api_for(&host).ok_or("This server has no patch choice.")?;
+    info!("patch choice: setting {channel} (confirmed: {confirm})");
     let token = hv_api_token(&state, &api, false).await?;
-    match hv_patch::put_channel(&state.client, &api, &token, &channel, confirm).await {
+    let result = match hv_patch::put_channel(&state.client, &api, &token, &channel, confirm).await {
         Err(hv_patch::ApiError::Unauthorized) => {
             let token = hv_api_token(&state, &api, true).await?;
             hv_patch::put_channel(&state.client, &api, &token, &channel, confirm)
@@ -5328,7 +5490,11 @@ async fn hv_set_patch_channel(
                 .map_err(|e| e.text())
         }
         other => other.map_err(|e| e.text()),
+    };
+    if let Err(e) = &result {
+        warn!("patch choice {channel} failed: {e}");
     }
+    result
 }
 
 /// Hunsterverse: the events running now, from our REST API (hv_events.rs).
@@ -5346,8 +5512,16 @@ async fn hv_live_events(state: tauri::State<'_, TauriState>) -> Result<Value, St
 async fn hv_check_launcher_update(
     state: tauri::State<'_, TauriState>,
 ) -> Result<hv_update::UpdateInfo, String> {
-    let manifest = hv_update::fetch_manifest(&state.client).await?;
+    let manifest = hv_update::fetch_manifest(&state.client).await.map_err(|e| {
+        warn!("launcher update check failed: {e}");
+        e
+    })?;
     let info = hv_update::update_info(&manifest);
+    info!(
+        "launcher update check: latest {} (this is {})",
+        manifest.version,
+        env!("CARGO_PKG_VERSION")
+    );
     state.state_sync.lock().await.hv_update_manifest = Some(manifest);
     Ok(info)
 }
@@ -5373,12 +5547,267 @@ async fn hv_install_launcher_update(
         let _ = &window;
         None
     };
-    hv_update::download_and_install(&state.client, &manifest, exe, hv_update::PUBLIC_KEY, hwnd).await?;
+    info!("launcher update: installing {}", manifest.version);
+    if let Err(e) =
+        hv_update::download_and_install(&state.client, &manifest, exe, hv_update::PUBLIC_KEY, hwnd).await
+    {
+        warn!("launcher update failed: {e}");
+        return Err(e);
+    }
     {
         let mut state_sync = state.state_sync.lock().await;
         cancel_all_requests(&mut state_sync);
     }
-    hv_update::restart(exe)
+    info!("launcher update: restarting into {}", manifest.version);
+    let result = hv_update::restart(exe);
+    if let Err(e) = &result {
+        warn!("{e}");
+    }
+    result
+}
+
+// --- Hunsterverse (1.5.4-hv6): log files and the problem report (hv_log.rs) ---
+
+/// The settings and state the problem report shows (never the username,
+/// password or tokens).
+fn hv_report_settings(state_sync: &TauriStateSync) -> Vec<(String, String)> {
+    let endpoint = &state_sync.current_endpoint;
+    let root = state_sync.effective_folder();
+    let server_key = endpoint.server_key();
+    let prefs = &state_sync.launcher_prefs;
+    let ui = &state_sync.ui_prefs;
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut add = |k: &str, v: String| out.push((k.to_string(), v));
+    add(
+        "Style",
+        if normalize_launcher_style(state_sync.style) == PS4_STYLE { "PS4" } else { "classic" }.into(),
+    );
+    add("Language", state_sync.locale.clone());
+    add(
+        "Server",
+        format!(
+            "{} ({}, game port {:?}, launcher port {:?}, mode {})",
+            endpoint.name,
+            server_key,
+            endpoint.game_port,
+            endpoint.launcher_port,
+            if endpoint.server_mode.is_empty() { &prefs.server_mode } else { &endpoint.server_mode }
+        ),
+    );
+    add("Game folder", root.display().to_string());
+    add(
+        "Game version",
+        format!("{:?}{}", ui.game_version, if ui.force_game_version { " (forced)" } else { "" }),
+    );
+    add(
+        "Wine prefix mode",
+        format!(
+            "{}{}",
+            prefs.wine_prefix_mode,
+            prefs
+                .wine_prefix_custom_path
+                .as_ref()
+                .map(|p| format!(" ({p})"))
+                .unwrap_or_default()
+        ),
+    );
+    add("Controller DLLs", prefs.preload_controller_dlls.to_string());
+    add("Hardware acceleration (Linux)", ui.linux_hardware_acceleration.to_string());
+    add("High-DPI fix (Windows)", ui.hv_dpi_fix.to_string());
+    add("Dev mode", ui.dev_mode.to_string());
+    add(
+        "Logged in",
+        match state_sync.auth_resp.as_ref() {
+            Some(auth) => format!(
+                "yes, {} characters, patch server {}",
+                auth.characters.len(),
+                if auth.patch_server.is_empty() { "(none)" } else { &auth.patch_server }
+            ),
+            None => "no".into(),
+        },
+    );
+    add("Patch offered at login", state_sync.patcher_resp.is_some().to_string());
+    add(
+        "Active server (patched for)",
+        fs::read_to_string(root.join("Mezeporta/active_server"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "(none)".into()),
+    );
+    add(
+        "Installed patch",
+        match hv_patch::load_installed(&root, &server_key) {
+            Some(i) => format!(
+                "{} {} (etag {})",
+                i.channel,
+                if i.version.is_empty() { "?" } else { &i.version },
+                i.etag
+            ),
+            None => "(no record)".into(),
+        },
+    );
+    out
+}
+
+fn hv_lines(items: &[(String, String)]) -> String {
+    items.iter().map(|(k, v)| format!("{k}: {v}\n")).collect()
+}
+
+/// The report's crash part (hv_crash.rs): the last game start, the game
+/// files, hvmods' crash files, Windows Error Reporting.
+fn hv_report_blocks(dir: Option<&Path>, root: &Path) -> Vec<(String, String)> {
+    let mut blocks = Vec::new();
+    let last = dir.and_then(hv_crash::last_exit);
+    blocks.push((
+        "Last game start (game.log)".to_string(),
+        match &last {
+            Some(exit) => hv_lines(&hv_crash::summary_lines(exit)),
+            None => "no game start recorded\n".to_string(),
+        },
+    ));
+    blocks.push((
+        format!("Game files in {}", root.display()),
+        hv_lines(&hv_crash::game_files(root)),
+    ));
+    blocks.extend(hv_crash::hvmods_files(root));
+    let (wer, dumps) = hv_crash::wer_locations();
+    if cfg!(windows) {
+        let found = hv_crash::wer_reports(&wer, &dumps, 5);
+        blocks.push((
+            "Windows Error Reporting (Mezeporta.exe, mhf.exe; newest 5)".to_string(),
+            if found.is_empty() { "none found\n".to_string() } else { hv_lines(&found) },
+        ));
+    }
+    blocks
+}
+
+/// Hunsterverse (1.5.4-hv6): the last game start, when it ended early,
+/// crashed or did not start and the player has not seen it yet: the launcher
+/// then offers "Save problem report" (HunsterversePanel.vue).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HvGameExit {
+    /// "early", "crash", "notStarted".
+    kind: String,
+    detail: String,
+    secs: Option<u64>,
+    /// A debug launch can be offered (Linux: Wine or Proton).
+    can_debug: bool,
+    /// That start was a debug launch already.
+    was_debug: bool,
+}
+
+#[tauri::command]
+fn hv_last_game_exit() -> Option<HvGameExit> {
+    let exit = hv_crash::last_exit(&hv_log::log_dir()?)?;
+    let kind = match hv_crash::verdict(&exit) {
+        hv_crash::Verdict::Normal => return None,
+        _ if exit.noted => return None,
+        hv_crash::Verdict::Early => "early",
+        hv_crash::Verdict::Crash => "crash",
+        hv_crash::Verdict::NotStarted => "notStarted",
+    };
+    let mut detail = hv_crash::headline(&exit);
+    if let Some(first) = exit.errors.first() {
+        detail.push_str(&format!(" | {first}"));
+    }
+    Some(HvGameExit {
+        kind: kind.into(),
+        detail: hv_log::redact(&detail),
+        secs: exit.secs,
+        can_debug: cfg!(not(windows)),
+        was_debug: exit.debug,
+    })
+}
+
+/// The player has seen the message: it does not come back for this start.
+#[tauri::command]
+fn hv_game_exit_noted() {
+    if let Some(dir) = hv_log::log_dir() {
+        hv_crash::mark_noted(&dir);
+    }
+}
+
+/// Linux: the next game start is a debug launch (hv_crash::DEBUG_WINEDEBUG).
+#[tauri::command]
+fn hv_set_debug_launch(on: bool) -> bool {
+    hv_crash::set_debug_launch(on && cfg!(not(windows)));
+    info!("debug launch for the next game start: {}", hv_crash::debug_launch_set());
+    hv_crash::debug_launch_set()
+}
+
+#[tauri::command]
+fn hv_debug_launch_set() -> bool {
+    hv_crash::debug_launch_set()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HvProblemReport {
+    /// The saved file (empty when it could not be written).
+    path: String,
+    folder: String,
+    text: String,
+}
+
+/// Settings, Advanced, Problem report: makes the report, saves it in the log
+/// folder and, with `open_folder`, shows that folder.
+#[tauri::command]
+async fn hv_problem_report(
+    state: tauri::State<'_, TauriState>,
+    open_folder: bool,
+) -> Result<HvProblemReport, String> {
+    let (settings, root) = {
+        let state_sync = state.state_sync.lock().await;
+        (hv_report_settings(&state_sync), state_sync.effective_folder())
+    };
+    info!("making a problem report");
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        let now = SystemTime::now();
+        let dir = hv_log::log_dir();
+        let blocks = hv_report_blocks(dir.as_deref(), &root);
+        let text = hv_log::build_report(dir.as_deref(), now, &hv_log::system_info(true), &settings, &blocks);
+        let path = match dir.as_deref() {
+            Some(dir) => match hv_log::save_report(dir, now, &text) {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    warn!("could not save the problem report in {}: {e}", dir.display());
+                    None
+                }
+            },
+            None => None,
+        };
+        (dir, path, text)
+    })
+    .await
+    .map_err(|e| format!("could not make the report: {e}"))?;
+    let (dir, path, text) = report;
+    if let (true, Some(dir)) = (open_folder, dir.as_deref()) {
+        if let Err(e) = hv_log::open_folder(dir, path.as_deref()) {
+            warn!("{e}");
+        }
+    }
+    Ok(HvProblemReport {
+        path: path.map(|p| p.display().to_string()).unwrap_or_default(),
+        folder: dir.map(|d| d.display().to_string()).unwrap_or_default(),
+        text,
+    })
+}
+
+#[tauri::command]
+fn hv_open_log_folder() -> Result<String, String> {
+    let dir = hv_log::log_dir().ok_or("No log folder could be written.")?;
+    hv_log::open_folder(&dir, None)?;
+    Ok(dir.display().to_string())
+}
+
+/// The messages the launcher shows the player (errors, warnings), into the log.
+#[tauri::command]
+fn hv_log_ui(level: String, message: String) {
+    match level.as_str() {
+        "error" => error!(target: "app::ui", "{message}"),
+        "warning" | "warn" => warn!(target: "app::ui", "{message}"),
+        _ => info!(target: "app::ui", "{message}"),
+    }
 }
 
 fn cancel_all_requests(state_sync: &mut TauriStateSync) {
@@ -5530,6 +5959,12 @@ impl From<&server::FriendData> for mhf_iel::FriendData {
 }
 
 fn main() {
+    // Hunsterverse (1.5.4-hv6): the game exit watcher (Windows; hv_crash.rs),
+    // before anything else.
+    if let Some(code) = hv_crash::run_watcher_from_args() {
+        std::process::exit(code);
+    }
+
     // Hunsterverse (1.5.4-hv5): the elevated step of a launcher update (started
     // through the UAC prompt by hv_update::install): swap the file and exit,
     // before any window, CLI mode or single-instance lock.
@@ -5544,6 +5979,10 @@ fn main() {
         std::process::exit(0);
     }
 
+    // Hunsterverse (1.5.4-hv6): our logger (stdout as before, plus the log
+    // file opened below; hv_log.rs) instead of tauri-plugin-log.
+    hv_log::init();
+
     // GUI mode: detach console so cmd doesn't hang and the launcher is clean.
     #[cfg(windows)]
     detach_console_for_gui();
@@ -5551,17 +5990,37 @@ fn main() {
     // Hunsterverse (1.5.4-hv2): after a self-update, let the old process exit
     // first (Windows), then remove the old binary it left (hv_update.rs).
     hv_update::wait_for_previous_process();
+    info!(
+        "Mezeporta {} starting (pid {})",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id()
+    );
     if let Some(exe) = launcher_exe() {
         hv_update::cleanup_after_update(exe);
     }
 
     let _single_instance_guard = acquire_single_instance_mutex();
-    // Log plugin has an issue where it cannot be initialized twice.
-    let mut log_plugin_initial = Some(
-        tauri_plugin_log::Builder::default()
-            .targets(vec![LogTarget::Stdout, LogTarget::Webview])
-            .build(),
-    );
+    // Hunsterverse (1.5.4-hv6): the log file, after the single-instance check
+    // (a second launcher must not move the running one's file aside).
+    match hv_log::attach_file(&default_effective_folder()) {
+        Some(dir) => info!("log folder: {}", dir.display()),
+        None => warn!("no log folder could be written; logging to stdout only"),
+    }
+    hv_log::log_system_info();
+    if let Some(dir) = hv_log::log_dir() {
+        if let Some(exit) = hv_crash::last_exit(&dir) {
+            let verdict = hv_crash::verdict(&exit);
+            let text = format!("last game start ({} UTC): {}", exit.started, hv_crash::headline(&exit));
+            if verdict == hv_crash::Verdict::Normal {
+                info!("{text}");
+            } else {
+                warn!("{text} [{verdict:?}]");
+                for line in &exit.errors {
+                    warn!("  game output: {line}");
+                }
+            }
+        }
+    }
     loop {
         let (config, run, game_root, launcher_prefs_for_launch, app_handle) = {
             let default_endpoints = config::get_default_endpoints();
@@ -5585,10 +6044,7 @@ fn main() {
             // initialize the plugin; the Store is opened in `setup`
             let store_plugin = tauri_plugin_store::Builder::default().build();
 
-            let mut builder = tauri::Builder::default().plugin(store_plugin);
-            if let Some(log_plugin) = log_plugin_initial.take() {
-                builder = builder.plugin(log_plugin);
-            }
+            let builder = tauri::Builder::default().plugin(store_plugin);
             let mut app = match builder
                 .manage(TauriState {
                     client: reqwest::ClientBuilder::new()
@@ -5787,7 +6243,14 @@ fn main() {
                     hv_set_patch_channel,
                     hv_check_launcher_update,
                     hv_install_launcher_update,
-                    hv_live_events
+                    hv_live_events,
+                    hv_problem_report,
+                    hv_open_log_folder,
+                    hv_log_ui,
+                    hv_last_game_exit,
+                    hv_game_exit_noted,
+                    hv_set_debug_launch,
+                    hv_debug_launch_set
                 ])
                 .build(tauri::generate_context!())
             {

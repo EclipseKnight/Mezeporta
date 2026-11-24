@@ -123,7 +123,12 @@ pub(crate) fn resolve_layout_dll_name(graphics_ver: u32) -> (PCSTR, &'static str
 }
 
 pub(crate) fn load_layout_entry(dll_name: PCSTR) -> Result<(HMODULE, FARPROC, RawEntry)> {
-    let module = unsafe { LoadLibraryA(dll_name) }.or(Err(Error::Dll))?;
+    // Hunsterverse (1.5.4-hv6): keep Windows' reason (a DLL it needs is
+    // missing, a bad image, ...) for the launcher's log and game.log.
+    let module = unsafe { LoadLibraryA(dll_name) }.map_err(|e| {
+        let name = unsafe { dll_name.to_string() }.unwrap_or_else(|_| "mhfo dll".into());
+        Error::DllLoad(name, format!("{} (HRESULT 0x{:08X})", e.message(), e.code().0 as u32))
+    })?;
     let proc = unsafe { GetProcAddress(module, s!("mhDLL_Main")) };
     let entry = unsafe { farproc_or(proc)? };
     Ok((module, proc, entry))

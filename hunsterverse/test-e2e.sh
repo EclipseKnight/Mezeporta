@@ -9,13 +9,13 @@
 #
 # NEW_BIN:  this version's Linux launcher (e.g. 1.5.4-hv4, built by build-release.sh or
 #           `npx tauri build -b none --target x86_64-unknown-linux-gnu --config src-tauri/tauri.linux.conf.json`)
-# NEXT_BIN: the same source built with a higher version (e.g. 1.5.4-hv5), the "new release"
+# NEXT_BIN: the same source built with a higher version (e.g. 1.5.4-hv7), the "new release"
 #           for the update test. It is signed here with the real release key
 #           (TAURI_PRIVATE_KEY_PATH / HV_KEY_PASSWORD_FILE, as build-release.sh),
 #           since NEW_BIN only accepts that key.
-# Env: NEXT_VERSION  NEXT_BIN's version (default 1.5.4-hv5);
+# Env: NEXT_VERSION  NEXT_BIN's version (default 1.5.4-hv7);
 #      NEW_VERSION   NEW_BIN's version: if set, the header must show it;
-#      SCENARIOS     default "patch events proton cancel update" (e.g. "update" for an old NEW_BIN);
+#      SCENARIOS     default "patch events proton cancel report update" (e.g. "update" for an old NEW_BIN);
 #      SHOTS         folder for screenshots of the character page;
 #      STYLE         launcher look: 1 classic (default), 3 PS4.
 #
@@ -48,6 +48,16 @@
 #           fake server stalls it half-way): no file of that patch reaches the
 #           game folder, which holds the original files; the next login offers
 #           the patch again and installs all of it.
+#   report: (hv6) after the game starts above: game.log holds the stand-in
+#           Proton's output and exit code; the stand-in "game" ended at once,
+#           so the launcher opens with "The game closed right after it
+#           started" (exit code 0): its Save report writes a report, "Debug
+#           the next game start" is taken, Close marks it seen; Settings,
+#           Advanced, Save report writes Mezeporta/logs/problem-report-*.txt
+#           with the system, the settings, the last game start, the game
+#           files and the logs (the game start included) and opens the log
+#           folder; the next game start gets WINEDEBUG and game.log says
+#           "debug launch"; at most 5 launcher log files; the password in none.
 #   update: a tampered download is refused with the file unchanged; the
 #           signed one replaces the binary and the launcher restarts into it
 #           in place (same PID).
@@ -59,7 +69,7 @@ NEW_BIN="$(realpath "$1")"
 NEXT_BIN="$(realpath "$2")"
 KEY="${TAURI_PRIVATE_KEY_PATH:-$HOME/.secrets/mezeporta-updater.key}"
 KEY_PASSWORD_FILE="${HV_KEY_PASSWORD_FILE:-$HOME/.secrets/mezeporta-updater.key.password}"
-NEXT_VERSION="${NEXT_VERSION:-1.5.4-hv5}" SCENARIOS="${SCENARIOS:-patch events proton cancel update}"
+NEXT_VERSION="${NEXT_VERSION:-1.5.4-hv7}" SCENARIOS="${SCENARIOS:-patch events proton cancel report update}"
 export NEXT_VERSION
 [[ -z "${SHOTS:-}" ]] || { mkdir -p "$SHOTS"; export SHOTS="$(realpath "$SHOTS")"; }
 GP=${GP:-18480} AP=${AP:-18481} RP=${RP:-18482} DISPLAY_NUM=${DISPLAY_NUM:-97}
@@ -129,7 +139,7 @@ mkdir -p "$WORK/proton" "$STATE/compat"
 { echo '#!/bin/sh'
   echo "log='$STATE/proton-calls.log'"
   cat <<'EOF'
-{ echo "ARGS $*"; echo "COMPAT ${STEAM_COMPAT_DATA_PATH:-}"
+{ echo "ARGS $*"; echo "COMPAT ${STEAM_COMPAT_DATA_PATH:-}"; echo "WINEDEBUG ${WINEDEBUG:-}"
   case " $* " in *" --stdin-b64 "*) echo "STDIN $(cat)" ;; esac
   echo END; } >> "$log"
 EOF
@@ -193,6 +203,11 @@ python3 -I "$HERE/e2e/drive.py" cancel "$GAME" "$STATE" || { tail -n 40 "$WORK/d
 grep -q " GET /prerelease/mods/dat/zz-cancel-test.pac stalled" "$STATE/requests.log" || { echo "FAIL the stalled download did not happen" >&2; exit 1; }
 grep -q " GET /prerelease/mods/dat/zz-cancel-test.pac 200" "$STATE/requests.log" || { echo "FAIL the file was not downloaded again after the cancel" >&2; exit 1; }
 echo "ok   server log: the cancelled download, then the whole file at the next login"
+fi
+
+if [[ " $SCENARIOS " == *" report "* ]]; then
+echo "== log files and problem report"
+python3 -I "$HERE/e2e/drive.py" report "$GAME" "$STATE" || { tail -n 40 "$WORK/driver.out" >&2; exit 1; }
 fi
 
 if [[ " $SCENARIOS " == *" update "* ]]; then

@@ -374,10 +374,14 @@ export function logText(level, text) {
 }
 
 export function logMessage(level, message, args) {
+  const text = getMessage(message, args);
   storePrivate.log.push({
     level,
-    message: getMessage(message, args),
+    message: text,
   });
+  // Hunsterverse (1.5.4-hv6): what the player is shown also goes into the
+  // launcher's log file (hv_log.rs).
+  invoke("hv_log_ui", { level: String(level), message: `${message} | ${text}` }).catch(() => {});
 }
 
 function isBlankConfiguredPort(value) {

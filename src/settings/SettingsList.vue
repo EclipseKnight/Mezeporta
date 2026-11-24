@@ -5,6 +5,8 @@ import { readDir } from "@tauri-apps/api/fs";
 import { platform } from "@tauri-apps/api/os";
 import { join } from "@tauri-apps/api/path";
 import { appWindow, PhysicalSize } from "@tauri-apps/api/window";
+import { writeText } from "@tauri-apps/api/clipboard";
+import { hvDebugLaunch, loadHvDebugLaunch, setHvDebugLaunch } from "../components/hvDebugLaunch";
 import { computed, getCurrentInstance, nextTick, onMounted, reactive, ref, watch } from "vue";
 import {
   CLASSIC_STYLE,
@@ -47,6 +49,43 @@ const vueInstance = getCurrentInstance();
 function t(key, fallback = key) {
   return String(vueInstance?.proxy?.$t?.(key, fallback) ?? fallback);
 }
+
+// Hunsterverse (1.5.4-hv6): Problem report (hv_log.rs). "Save" writes the
+// report into the log folder and opens that folder; "Copy" also puts its
+// text on the clipboard (pasted into Discord it becomes a file).
+const hvReport = reactive({ busy: false, status: "", path: "", error: false });
+async function onHvProblemReport(copy) {
+  if (hvReport.busy) return;
+  playSelect();
+  hvReport.busy = true;
+  hvReport.error = false;
+  try {
+    const report = await invoke("hv_problem_report", { openFolder: !copy });
+    hvReport.path = report.path || report.folder || "";
+    if (copy) {
+      await writeText(report.text);
+      hvReport.status = t("hv-report-copied", "Report copied. Paste it into your help post on Discord (it becomes a file).");
+    } else if (report.path) {
+      hvReport.status = t("hv-report-saved", "Report saved. Attach this file to your help post on Discord:");
+    } else {
+      hvReport.error = true;
+      hvReport.status = t("hv-report-not-saved", "The report could not be saved. Use Copy report instead.");
+    }
+  } catch (error) {
+    hvReport.error = true;
+    hvReport.status = `${t("hv-report-failed", "Could not make the report")}: ${error}`;
+  } finally {
+    hvReport.busy = false;
+  }
+}
+
+// Hunsterverse (1.5.4-hv6): Linux, the next game start with Wine's debug
+// output in game.log (hv_crash.rs; state shared with the crash message).
+async function onHvDebugLaunch() {
+  playSelect();
+  await setHvDebugLaunch(!hvDebugLaunch.on);
+}
+onMounted(loadHvDebugLaunch);
 
 const HD_CAPABLE_VERSIONS = ["G6", "G7", "G9.1", "G10.1", "Z1", "Z2", "Z2T", "ZZ"];
 const GAME_BRANCHES = ["Online", "Forward", "G", "Z"];
@@ -2188,6 +2227,68 @@ function onMaxCharDisplayNumberInput(value) {
           :locked="sessionSettingsLocked"
           :lock-tooltip="settingsLockTooltip"
         />
+
+        <SettingsItem :name="$t('hv-report-label', 'Problem report')" info-key="hv-problem-report">
+          <div class="flex flex-wrap items-center justify-center gap-3">
+            <button
+              type="button"
+              class="settings-resolution-action-button"
+              data-settings-info-key="hv-problem-report"
+              data-controller-clickable="true"
+              data-controller-size="big"
+              data-controller-node="settings-hv-report-save"
+              data-controller-right="settings-hv-report-copy"
+              :disabled="hvReport.busy"
+              @mouseenter="playHover()"
+              @click="onHvProblemReport(false)"
+            >
+              {{ $t("hv-report-save-button", "Save report") }}
+            </button>
+            <button
+              type="button"
+              class="settings-resolution-action-button"
+              data-settings-info-key="hv-problem-report"
+              data-controller-clickable="true"
+              data-controller-size="big"
+              data-controller-node="settings-hv-report-copy"
+              data-controller-left="settings-hv-report-save"
+              :data-controller-right="isLinuxHost ? 'settings-hv-debug-launch' : undefined"
+              :disabled="hvReport.busy"
+              @mouseenter="playHover()"
+              @click="onHvProblemReport(true)"
+            >
+              {{ $t("hv-report-copy-button", "Copy report") }}
+            </button>
+            <button
+              v-if="isLinuxHost"
+              type="button"
+              class="settings-resolution-action-button"
+              data-settings-info-key="hv-problem-report"
+              data-controller-clickable="true"
+              data-controller-size="big"
+              data-controller-node="settings-hv-debug-launch"
+              data-controller-left="settings-hv-report-copy"
+              :aria-pressed="hvDebugLaunch.on"
+              @mouseenter="playHover()"
+              @click="onHvDebugLaunch()"
+            >
+              {{ $t("hv-debug-launch-button", "Debug the next game start") }}{{ hvDebugLaunch.on ? " ✓" : "" }}
+            </button>
+          </div>
+          <template #extended>
+            <div v-if="hvDebugLaunch.on" class="settings-game-folder-description hv-report-status">
+              {{ $t("hv-debug-launch-on", "The next game start writes Wine's debug output into the log. Start the game again, then save a new report.") }}
+            </div>
+            <div
+              v-if="hvReport.status"
+              class="settings-game-folder-description hv-report-status"
+              :class="{ 'settings-inline-error': hvReport.error }"
+            >
+              {{ hvReport.status }}
+              <div v-if="hvReport.path" class="hv-report-path">{{ hvReport.path }}</div>
+            </div>
+          </template>
+        </SettingsItem>
       </div>
     </template>
   </div>
@@ -2538,6 +2639,13 @@ function onMaxCharDisplayNumberInput(value) {
 
 .settings-prefix-status-warning {
   color: #ffd7a0;
+}
+
+.hv-report-path {
+  margin-top: 0.25rem;
+  font-family: monospace;
+  word-break: break-all;
+  user-select: text;
 }
 
 .settings-inline-error {

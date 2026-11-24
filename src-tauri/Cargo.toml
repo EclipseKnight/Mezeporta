@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "1.5.4-hv5"
+version = "1.5.4-hv6"
 description = "Mezeporta"
 authors = ["LilButter"]
 license = ""
@@ -28,7 +28,6 @@ tokio = { version = "1", features = ["macros", "net", "time"] }
 tokio-util = { version = "0.7", features = [] }
 tauri = { version = "1.5", features = ["api-all"] }
 tauri-plugin-store = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v1" }
-tauri-plugin-log = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v1" }
 
 meze-butter = { path = "./meze-butter" }
 encoding_rs = "0.8"
