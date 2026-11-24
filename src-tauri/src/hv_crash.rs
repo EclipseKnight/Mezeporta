@@ -44,9 +44,9 @@ pub const EARLY_EXIT_SECS: u64 = 60;
 pub const RETURN_TO_LAUNCHER: i64 = 102;
 /// What a debug game start sets (Linux, Wine or Proton): exceptions and
 /// every DLL load, with times and threads, into game.log. Proton keeps a
-/// WINEDEBUG that is set (it only defaults to -all). PROTON_LOG is not set:
-/// it would send the output to ~/steam-<id>.log, which the Steam Deck's
-/// launcher sandbox cannot read.
+/// WINEDEBUG that is set (it only defaults to -all). Proton's own log
+/// (PROTON_LOG) only where the Proton command passes on what it needs
+/// (hv_proton::proton_log_passes).
 #[cfg_attr(windows, allow(dead_code))]
 pub const DEBUG_WINEDEBUG: &str = "+timestamp,+pid,+tid,+seh,+loaddll";
 
@@ -124,7 +124,7 @@ const MEZE_DEPS: &[(i64, &str)] = &[
     (2, "meze-deps.exe: could not read its start data"),
     (3, "meze-deps.exe: start data not base64"),
     (4, "meze-deps.exe: start data not text"),
-    (5, "meze-deps.exe: start data not readable"),
+    (5, "meze-deps.exe: start data missing or not readable"),
     (6, "meze-deps.exe: could not start the game (its error is in game.log)"),
 ];
 

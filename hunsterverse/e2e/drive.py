@@ -18,7 +18,8 @@ SCENARIO:
   proton   Steam Deck: with no Wine (MEZEPORTA_WINE_CMD missing) and the
            installer's Proton command (MEZEPORTA_PROTON_CMD, a stand-in that
            records its calls in STATE_DIR/proton-calls.log), Start runs
-           "proton run <meze-deps.exe> --stdin-b64" even when the setting says
+           "proton getcompatpath <game folder>" (empty stdin), then "proton
+           runinprefix <meze-deps.exe> --stdin-b64" (hv7) even when the setting says
            "portable"; with "proton" set and Dev Mode off, opening Settings
            keeps it and offers Proton
   cancel   a cancelled patch (hv4 fix, the owner's steps): Stable installed;
@@ -536,7 +537,7 @@ def wine_mode(game):
 LOG_TEXT = "return document.body.innerText;"
 
 
-def start_through_proton(s, state, what):
+def start_through_proton(s, game, state, what):
     """Start the character; the stand-in Proton must get the game helper and
     its settings on stdin (the launcher then closes)."""
     calls = os.path.join(state, "proton-calls.log")
@@ -568,16 +569,22 @@ def start_through_proton(s, state, what):
         except Exception:
             page = "(window gone)"
         fail("%s: Proton was not called (calls %r; page says %r)" % (what, text, page[-400:] if page else page))
+    # hv7: Proton's prefix set-up first (no stdin), then the game through
+    # runinprefix (Proton's "run" goes through steam.exe, which drops stdin).
     args = [l[5:] for l in text.splitlines() if l.startswith("ARGS ")]
-    if len(args) != 1 or not args[0].startswith("run ") or not args[0].endswith("meze-deps.exe --stdin-b64"):
+    if (len(args) != 2 or not args[0].startswith("getcompatpath ")
+            or os.path.realpath(args[0][len("getcompatpath "):]) != os.path.realpath(game)
+            or not args[1].startswith("runinprefix ") or not args[1].endswith("meze-deps.exe --stdin-b64")):
         fail("%s: Proton calls %r" % (what, args))
+    if "PREP-STDIN-BYTES 0" not in text:
+        fail("%s: the prefix set-up read stdin: %r" % (what, text))
     if "COMPAT " + os.path.join(state, "compat") not in text:
         fail("%s: STEAM_COMPAT_DATA_PATH not passed: %r" % (what, text))
     stdin = [l[6:] for l in text.splitlines() if l.startswith("STDIN ")][0]
     cfg = json.loads(base64.b64decode(stdin))
     if cfg.get("char_id") != 7:
         fail("%s: game settings on stdin for character %r" % (what, cfg.get("char_id")))
-    ok("%s: %s, the game settings on stdin (character 7)" % (what, args[0]))
+    ok("%s: %s, then %s, the game settings on stdin (character 7)" % (what, args[0], args[1]))
 
 
 def scenario_proton(game, state):
@@ -588,7 +595,7 @@ def scenario_proton(game, state):
     s = Session(exe)
     try:
         login(s)
-        start_through_proton(s, state, "setting 'portable', no Wine")
+        start_through_proton(s, game, state, "setting 'portable', no Wine")
     finally:
         s.close()
 
@@ -623,7 +630,7 @@ def scenario_proton(game, state):
         else:
             s.screenshot(os.path.join(state, "proton-settings-back.png"))
             fail("could not leave Settings (screenshot proton-settings-back.png)")
-        start_through_proton(s, state, "setting 'proton'")
+        start_through_proton(s, game, state, "setting 'proton'")
         if wine_mode(game) != "proton":
             fail("winePrefixMode is now %r" % wine_mode(game))
     finally:
@@ -695,7 +702,7 @@ def scenario_report(game, state):
             time.sleep(1)
         calls = os.path.join(state, "proton-calls.log")
         before_calls = os.path.getsize(calls)
-        start_through_proton(s, state, "debug launch")
+        start_through_proton(s, game, state, "debug launch")
         with open(calls) as f:
             f.seek(before_calls)
             chunk = f.read()
@@ -703,7 +710,15 @@ def scenario_report(game, state):
             fail("debug launch: Proton got %r" % [l for l in chunk.splitlines() if l.startswith("WINEDEBUG")])
         if "(debug launch: WINEDEBUG=" not in read("game.log"):
             fail("game.log does not mark the debug launch")
-        ok("debug launch: Proton got WINEDEBUG=+timestamp,+pid,+tid,+seh,+loaddll; game.log says so")
+        game_call = chunk[chunk.index("ARGS runinprefix"):]
+        got = [l[len("PROTONLOG "):].split("|") for l in game_call.splitlines() if l.startswith("PROTONLOG ")]
+        want = ["1", os.path.realpath(logs), "hunsterverse"]
+        if (not got or [got[0][0], os.path.realpath(got[0][1]), got[0][2]] != want) or "PROTON_LOG=1: Proton's output in steam-hunsterverse.log" not in read("game.log"):
+            fail("debug launch: Proton log variables %r (want %r)" % (got, want))
+        if "PROTONLOG ||" not in open(calls).read()[:before_calls]:
+            fail("PROTON_LOG was set on a start that was not a debug launch")
+        ok("debug launch: Proton got WINEDEBUG=+timestamp,+pid,+tid,+seh,+loaddll and PROTON_LOG=1 "
+           "(log in the log folder, SteamGameId=hunsterverse); game.log says so")
     finally:
         s.close()
     shown = report_path

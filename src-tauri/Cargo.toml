@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "1.5.4-hv6"
+version = "1.5.4-hv7"
 description = "Mezeporta"
 authors = ["LilButter"]
 license = ""

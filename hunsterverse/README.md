@@ -13,7 +13,8 @@ this folder (including the Linux zip's `run-mezeporta.sh`, since hv6),
 | 1.5.4-hv3 (2026-11-23) | The Patch button moved off the CAPCOM logo (classic: in the footer after "Online Players"; PS4 style: right of Settings), part of the launcher layout so it scales with the window; the header's "release ver." comes from `tauri.conf.json` (hv2 still said hv1); event badges from the website's event list (below); Proton on the Steam Deck (below) |
 | 1.5.4-hv4 (2026-11-23) | Downloaded patch files are kept per server (patch cache, below): switching Stable <-> pre-release takes them from there instead of downloading again. Cancelling a patch stops it (nothing moves into the game folder); on Windows the return from the game to the launcher starts a fresh launcher process (below); `Mezeporta-Linux.zip` stores `mezeporta-bin` and the `*.sh` files as executable (below) |
 | 1.5.4-hv5 (2026-11-23) | A self-update that needs administrator rights (launcher in Program Files, or files an administrator created) asks for them with the UAC prompt on Windows instead of failing with "access is denied"; clear messages when the prompt is declined, when it is still denied, on Linux, and when patching a protected game folder (below) |
-| 1.5.4-hv6 (built 2026-11-24, not published) | Includes hv5. Log files on disk (`Mezeporta/logs`, the current run and the 4 before), what the game start, login, patch and self-update do, the game's own output and exit code on Linux / Steam Deck, and a "Problem report" (Settings, Advanced: Save report, Copy report) for Discord; our own `run-mezeporta.sh` that logs too. `tauri-plugin-log` replaced by `hv_log.rs` ("Logs and problem reports", below). A game that closes within 60 s, crashes or does not start ("instant crash on launch"): its exit code in words (Windows NTSTATUS, Linux signals and Wine's codes; Windows too now, through a small watcher process), Wine's error lines, a message at the next launcher start offering "Save report", an optional debug launch on Linux (`WINEDEBUG=+seh,+loaddll`), and in the report the game files' sha256, hvmods' crash files and Windows Error Reporting entries (`hv_crash.rs`, below) |
+| 1.5.4-hv6 (2026-11-24) | Includes hv5. Log files on disk (`Mezeporta/logs`, the current run and the 4 before), what the game start, login, patch and self-update do, the game's own output and exit code on Linux / Steam Deck, and a "Problem report" (Settings, Advanced: Save report, Copy report) for Discord; our own `run-mezeporta.sh` that logs too. `tauri-plugin-log` replaced by `hv_log.rs` ("Logs and problem reports", below). A game that closes within 60 s, crashes or does not start ("instant crash on launch"): its exit code in words (Windows NTSTATUS, Linux signals and Wine's codes; Windows too now, through a small watcher process), Wine's error lines, a message at the next launcher start offering "Save report", an optional debug launch on Linux (`WINEDEBUG=+seh,+loaddll`), and in the report the game files' sha256, hvmods' crash files and Windows Error Reporting entries (`hv_crash.rs`, below) |
+| 1.5.4-hv7 (built 2026-11-24, not published) | Steam Deck: the game ended right after Start with exit code 5. `proton run` starts the game through Proton's `steam.exe`, which does not pass the launcher's stdin (the start data) on, so `meze-deps.exe` read nothing. Proton now runs `getcompatpath` (prefix set-up) then `runinprefix meze-deps.exe --stdin-b64`; plain Wine unchanged. A debug launch on Proton also gets Proton's own log where the Proton command passes the variables on (the installer's `proton-host.sh` does not yet). "The game's start data (hv7)" under "Proton on the Steam Deck", below |
 
 ## Client patch choice (hv2)
 
@@ -331,6 +332,56 @@ wine reg: No such file or directory"). Now:
   check already wanted only the Proton command (no wineserver, winetricks);
   the portable prefix install stays Wine only.
 
+### The game's start data (hv7)
+
+The launcher hands `meze-deps.exe` its start data (the `MhfConfig` JSON
+with the session token and password, base64) on stdin. Up to hv6 the game
+started as `proton run meze-deps.exe --stdin-b64`, and on a Steam Deck it
+ended at once with exit code 5 ("start data missing or not readable":
+`serde_json` failed on an empty string). Cause, found from a Deck
+player's debug report and reproduced on mhfz-dev (GE-Proton11-14, Wine
+9.0, 2026-11-24):
+
+- `proton run` starts Proton's `steam.exe` (`steam_helper/steam.c`), which
+  creates the game with `CreateProcessW(NULL, cmdline, NULL, NULL, FALSE,
+  ...)`: no handle inheritance and no `STARTF_USESTDHANDLES`. The game gets
+  no stdin handle (a probe exe saw handle 0, `ReadFile` error 6); Rust reads
+  that as an empty stdin. Its stderr is lost too, hence no error line.
+  Plain Wine starts the game directly with fd 0 as its stdin, which is why
+  Linux players with Wine never saw it. The earlier Deck test used a
+  stand-in Proton script, so it never ran `steam.exe`.
+- Ruled out: `flatpak-spawn --host` passes stdin on (the real Flatpak
+  runtime on mhfz-dev, through the installer's `proton-host.sh`), and
+  upstream's `meze-deps.exe` in the Linux zip (sha256 `f4894263...`) reads
+  this launcher's `MhfConfig` (the struct is unchanged since v1.5.4).
+
+Now (`hv_proton::GAME_SCRIPT`, through `/bin/sh` inside the exit-code
+wrapper): `proton getcompatpath "$PWD" </dev/null` first, which makes
+Proton create or upgrade its prefix (DXVK and so on) and then only
+converts a path, then `exec proton runinprefix meze-deps.exe --stdin-b64`,
+which runs Proton's own wine on the game directly, with the launcher's
+pipe as its stdin. The start data never touches the disk, the installer's
+`proton-host.sh` needs no change (it passes `"$@"`), and Proton's
+environment (prefix, DLL overrides, fsync) is the same as with `run`.
+What `runinprefix` skips: `steam.exe` (without `SteamGameId`, which
+`proton-host.sh` does not pass, it only started and awaited the game),
+Proton's game and Steam drive letters, and xalia (its controller
+accessibility helper). A failing `getcompatpath` is written to `game.log`
+(`== proton getcompatpath (prefix set-up) ended with exit code N`) and the
+game starts anyway. Without `/bin/sh` only `proton runinprefix` runs.
+
+Weighed and not taken: `cmd.exe /c "meze-deps.exe --stdin-b64 < file"`
+through `proton run` (the token and password in a file whose read we
+cannot see, so not deletable at a known time; `steam.exe` starts a console
+program such as `cmd.exe` with a new console); our own `meze-deps.exe` reading a file or
+the environment (a new Windows build to ship and keep, the old one stays
+on players' disks; `proton-host.sh` passes no new variables).
+
+First start after the update: `getcompatpath` sets up a prefix that is
+missing or from another Proton version (46 s for a new one on mhfz-dev;
+the first hv6 start on the Deck took 417 s, likely the same). Later starts
+add about a second.
+
 ## Logs and problem reports (hv6, `hv_log.rs`)
 
 Up to hv5 the launcher logged to stdout and to the webview only
@@ -380,8 +431,8 @@ report shows it.
   installed, every error. Patch choice (channel set, API errors). Self-update:
   check (latest version or error), install, the administrator step,
   restart, errors.
-- Game start: the exact command (`".../proton" "run" ".../meze-deps.exe"
-  "--stdin-b64"`), runtime, folder, what the launcher sets (`WINEPREFIX`,
+- Game start: the exact command (`".../proton" "runinprefix" ".../meze-deps.exe"
+  "--stdin-b64" (after "getcompatpath": Proton's prefix set-up)`; up to hv6 `"run"`), runtime, folder, what the launcher sets (`WINEPREFIX`,
   x11 variables, `WINEESYNC=0`/`WINEFSYNC=0`, `STEAM_COMPAT_DATA_PATH`), game
   version, character id, server; the process id; on Windows the meze-butter
   start and the exit code. At the next start: the last game start's result
@@ -477,10 +528,23 @@ The owner's main question for hv6: why the game crashes at once on launch
   `WINEDEBUG=+timestamp,+pid,+tid,+seh,+loaddll` (every exception and DLL
   load, with times and threads) into `game.log`, and its start line says
   `(debug launch: ...)`. Proton keeps a `WINEDEBUG` that is set; the
-  installer's `proton-host.sh` forwards it. `PROTON_LOG` is not set: Proton
-  would then write `~/steam-<id>.log`, which the Deck's launcher sandbox
-  cannot read. Plain starts stay as they were. The setting lasts for one
-  start and is not saved.
+  installer's `proton-host.sh` forwards it. Plain starts stay as they
+  were. The setting lasts for one start and is not saved.
+- **Proton's own log** (hv7, debug launch only): `PROTON_LOG=1`,
+  `PROTON_LOG_DIR=<log folder>` and `SteamGameId=hunsterverse`, so Proton
+  writes `steam-hunsterverse.log` beside the other logs (its header: Proton
+  version, options, kernel; then Wine's output, which then is not in
+  `game.log`). Proton writes that file only with `SteamGameId` set, and with
+  `PROTON_LOG` but no `SteamGameId` it sets `WINEDEBUG=-all` and the debug
+  output is lost (checked with GE-Proton11-14). So the launcher sets them
+  only when the Proton command passes them on: a command that uses
+  `flatpak-spawn` (the installer's `proton-host.sh`) must name all three,
+  anything else is taken to pass its environment on
+  (`hv_proton::proton_log_passes`). Today's `proton-host.sh` names only
+  `PROTON_LOG`, so on a Deck the debug launch stays as in hv6 (`WINEDEBUG`
+  into `game.log`, which works) and the start line says "no Proton log".
+  Each Proton start deletes an older `steam-hunsterverse.log`. The report
+  has its first 40 and last 400 lines.
 - **In the report**: "Last game start (game.log)" (start time, result,
   verdict, Wine's error lines); "Game files in <folder>": `mhf.exe`,
   `mhfo-hd.dll`, `mhfo.dll`, `hvmods.dll`, `mhf.ini`,
@@ -583,7 +647,10 @@ launcher updates; launchers already updated stay on it until a newer release.
   (screenshots with `SHOTS`); the event badges from a stand-in events API
   (classic and PS4 style, screenshots), and the wrapper's flags while that
   API is down; Steam Deck: with no Wine and a stand-in Proton, Start runs
-  `proton run meze-deps.exe --stdin-b64` (setting `portable` or `proton`),
+  `proton getcompatpath <game folder>` with an empty stdin, then `proton
+  runinprefix meze-deps.exe --stdin-b64` with the game settings on stdin
+  (hv7; setting `portable` or `proton`; a debug launch also gets
+  `PROTON_LOG=1`, `PROTON_LOG_DIR` and `SteamGameId`),
   and `proton` stays set with Dev Mode off; a tampered update refused, the signed one installed and
   restarted in place; a cancelled patch (hv4 fix, the owner's steps): the
   pre-release chosen, its update dialog cancelled and the game started on the
@@ -609,6 +676,23 @@ launcher updates; launchers already updated stay on it until a newer release.
   running, noted), the real `/bin/sh` wrapper (exit 5 after 0 s: early;
   SIGSEGV: 139, crash), game files with sha256 and MISSING, hvmods' crash
   files, a UTF-16 `Report.wer` and a crash dump.
+- hv7, in the same `hv` tests (`hv_proton`, `hv_log`): the Proton game
+  script run by `/bin/sh` with a stand-in Proton (a path with a space):
+  `getcompatpath <folder>` with an empty stdin, then `runinprefix
+  meze-deps.exe --stdin-b64` with all of stdin and its exit code; a failed
+  `getcompatpath` is said and the game still starts; without a shell only
+  `runinprefix`, never `run`; when the Proton log variables get through
+  (Proton itself, today's `proton-host.sh`, one that names them); the
+  report's Proton log (first 40 and last 400 lines).
+- hv7, by hand on mhfz-dev with real GE-Proton11-14 and upstream's
+  `meze-deps.exe` (`f4894263...`), the launcher's own payload (from the e2e
+  run; its stand-in token padded to 16 characters like a real one), the two scripts taken from the source: hv6's `proton run` ends with
+  exit code 5 after 1-2 s (directly and through the installer's
+  `proton-host.sh` inside `org.gnome.Platform//51` with `flatpak-spawn
+  --host`); hv7's start creates a new prefix and meze-deps reads its start
+  data in both set-ups, then stops at the next steps of a test folder with
+  no game: `unable to find path to game` (no `mhf.ini`), with an empty
+  `mhf.ini` `unable to load or free mhfo dll` (a stand-in DLL).
 - `bash hunsterverse/tests/run-mezeporta.test.sh`: `run-mezeporta.sh` with a
   stand-in launcher: not a terminal (output and errors in the log, exit code
   kept), rotation, a terminal (`script`), no writable log folder.
@@ -621,4 +705,6 @@ launcher updates; launchers already updated stay on it until a newer release.
   scenario also checks the early-exit message at the next start (title,
   exit code, its Save report, Close noted in `game.log`), the report's
   "Last game start" and "Game files", and that "Debug the next game start"
-  reaches the stand-in Proton as `WINEDEBUG`.
+  reaches the stand-in Proton as `WINEDEBUG` (hv7: with `PROTON_LOG=1`,
+  `PROTON_LOG_DIR` = the log folder and `SteamGameId=hunsterverse`, none of
+  them on the plain starts before).

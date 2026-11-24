@@ -1,0 +1,3 @@
+Steam Deck fix: the game no longer closes right after you press Start (exit code 5). Proton did not hand the launcher's start data to the game; the launcher now starts it in a way that does.
+The first start after this update can take a little longer while Proton checks its prefix.
+"Debug the next game start" on the Steam Deck: also Proton's own log in the problem report, once the installer passes it on (run the installer again when a new one is out).

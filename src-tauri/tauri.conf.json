@@ -7,7 +7,7 @@
   },
   "package": {
     "productName": "Mezeporta",
-    "version": "1.5.4-hv6"
+    "version": "1.5.4-hv7"
   },
   "tauri": {
     "bundle": {

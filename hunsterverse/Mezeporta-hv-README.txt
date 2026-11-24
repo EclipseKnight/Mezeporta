@@ -50,6 +50,9 @@ This is the Mezeporta launcher v1.5.4 by LilButter
   launcher says so when you open it again (with the reason it can tell)
   and offers "Save report"; on Linux "Debug the next game start" adds
   Wine's debug output to the next start's log.
+- 1.5.4-hv7: Steam Deck: the game no longer closes right after Start
+  (exit code 5). Proton did not hand the launcher's start data on to the
+  game; the launcher now starts the game through Proton in a way that does.
 
 Source code: Mezeporta-v{version}-source.zip on the same release page
 (https://github.com/EclipseKnight/Mezeporta/releases), and the git history of

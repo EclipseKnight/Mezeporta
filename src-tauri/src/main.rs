@@ -2893,17 +2893,36 @@ pub(crate) fn run_mhf(
         // its output into game.log (it was thrown away); `sh` adds the exit
         // code there, since the launcher closes while the game runs.
         let folder = config.mhf_folder.clone().unwrap_or_else(|| game_root.clone());
+        // Only around a command that can run: a missing one must still fail
+        // here (the launcher shows the error) instead of inside `sh`.
+        let runnable_program = hv_log::find_program(&runtime.wine_command).filter(|p| {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        });
+        let runnable = runnable_program.is_some();
+        let sh = Path::new("/bin/sh");
+        let sh = (sh.is_file() && runnable).then_some(sh);
+        // Hunsterverse (1.5.4-hv7): Proton starts the game with `runinprefix`
+        // after `getcompatpath` (prefix set-up), not `run`: `run` goes through
+        // Proton's steam.exe, which does not pass stdin on (hv_proton.rs).
+        let game_argv: Vec<std::ffi::OsString> = match runtime.kind {
+            WineRuntimeKind::Proton => hv_proton::game_command(&runtime.wine_command, sh),
+            WineRuntimeKind::Wine => vec![runtime.wine_command.clone().into()],
+        };
         let mut shown = vec![runtime.wine_command.display().to_string()];
         if runtime.kind == WineRuntimeKind::Proton {
-            shown.push("run".into());
+            shown.push("runinprefix".into());
         }
         shown.push(helper_path.display().to_string());
         shown.push("--stdin-b64".into());
-        let shown = shown
+        let mut shown = shown
             .iter()
             .map(|a| format!("{a:?}"))
             .collect::<Vec<_>>()
             .join(" ");
+        if runtime.kind == WineRuntimeKind::Proton && sh.is_some() {
+            shown.push_str(" (after \"getcompatpath\": Proton's prefix set-up)");
+        }
         info!(
             "starting the game: {} (runtime {}, folder {}, {}, version {:?}, character {}, server {}:{})",
             shown,
@@ -2915,43 +2934,71 @@ pub(crate) fn run_mhf(
             config.server_host,
             config.server_port
         );
-        // A debug launch (hv_crash.rs): Wine's exceptions and DLL loads too.
+        // A debug launch (hv_crash.rs): Wine's exceptions and DLL loads too,
+        // and Proton's own log where the Proton command passes on what it
+        // needs (hv_proton.rs; the installer's proton-host.sh does not yet).
         let debug = hv_crash::take_debug_launch();
+        let proton_log_dir = match runtime.kind {
+            WineRuntimeKind::Proton => hv_log::log_dir(),
+            WineRuntimeKind::Wine => None,
+        };
+        if let Some(dir) = &proton_log_dir {
+            // One from an earlier debug launch would read as this start's.
+            let _ = fs::remove_file(dir.join(hv_proton::PROTON_LOG_FILE));
+        }
+        let proton_log_dir = proton_log_dir.filter(|_| {
+            debug
+                && hv_proton::proton_log_passes(&String::from_utf8_lossy(
+                    &runnable_program.as_ref().and_then(|p| fs::read(p).ok()).unwrap_or_default(),
+                ))
+        });
+        let mut debug_note = format!("WINEDEBUG={}", hv_crash::DEBUG_WINEDEBUG);
+        match (&proton_log_dir, runtime.kind) {
+            (Some(_), _) => debug_note.push_str(&format!(
+                ", PROTON_LOG=1: Proton's output in {}",
+                hv_proton::PROTON_LOG_FILE
+            )),
+            (None, WineRuntimeKind::Proton) => debug_note
+                .push_str(", no Proton log (the Proton command does not pass PROTON_LOG_DIR and SteamGameId on)"),
+            _ => {}
+        }
         if debug {
-            info!("debug launch: WINEDEBUG={}", hv_crash::DEBUG_WINEDEBUG);
+            info!("debug launch: {debug_note}");
         }
         let game_log = hv_log::game_output_file(&format!(
             "game start: {shown} in {}{}",
             folder.display(),
             if debug {
-                format!(" (debug launch: WINEDEBUG={})", hv_crash::DEBUG_WINEDEBUG)
+                format!(" (debug launch: {debug_note})")
             } else {
                 String::new()
             }
         ));
-        // Only around a command that can run: a missing one must still fail
-        // here (the launcher shows the error) instead of inside `sh`.
-        let exit_wrapper = Path::new("/bin/sh");
-        let runnable = hv_log::find_program(&runtime.wine_command).is_some_and(|p| {
-            use std::os::unix::fs::PermissionsExt;
-            fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        });
-        let mut command = match &game_log {
-            Some(_) if runnable && exit_wrapper.is_file() => {
-                let mut c = Command::new(exit_wrapper);
+        let mut command = match (&game_log, sh) {
+            (Some(_), Some(sh)) => {
+                let mut c = Command::new(sh);
                 c.arg("-c")
                     .arg(hv_crash::GAME_EXIT_CODE_SCRIPT)
                     .arg("mezeporta-game")
-                    .arg(&runtime.wine_command);
+                    .args(&game_argv);
                 c
             }
-            _ => Command::new(&runtime.wine_command),
+            _ => {
+                let mut c = Command::new(&game_argv[0]);
+                c.args(&game_argv[1..]);
+                c
+            }
         };
         runtime.apply_env(&mut command);
         if debug {
             command.env("WINEDEBUG", hv_crash::DEBUG_WINEDEBUG);
         }
-        runtime.append_runtime_prefix_args(&mut command);
+        if let Some(dir) = &proton_log_dir {
+            command
+                .env("PROTON_LOG", "1")
+                .env("PROTON_LOG_DIR", dir)
+                .env("SteamGameId", hv_proton::PROTON_LOG_GAME_ID);
+        }
         let (stdout, stderr) = match game_log.as_ref().and_then(|f| Some((f.try_clone().ok()?, f.try_clone().ok()?))) {
             Some((out, err)) => (Stdio::from(out), Stdio::from(err)),
             None if wait_for_exit => (Stdio::inherit(), Stdio::inherit()),

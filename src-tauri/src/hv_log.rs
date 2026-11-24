@@ -29,6 +29,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const LOG_STEM: &str = "mezeporta";
 pub const GAME_STEM: &str = "game";
 pub const SCRIPT_STEM: &str = "run-mezeporta";
+/// Proton's own log of a debug launch (hv7, `hv_proton::PROTON_LOG_FILE`).
+pub const PROTON_STEM: &str = "steam-hunsterverse";
 pub const REPORT_PREFIX: &str = "problem-report-";
 /// Older runs kept beside the current file (`mezeporta.1.log` .. `.4.log`).
 pub const KEEP_RUNS: usize = 4;
@@ -877,6 +879,18 @@ pub fn log_system_info() {
 // --- the report ----------------------------------------------------------
 
 /// The last `max_lines` lines of a file, read from at most its last 2 MiB.
+/// The first `max_lines` lines of a file (at most 64 KiB read).
+pub fn head_lines(path: &Path, max_lines: usize) -> Option<String> {
+    let mut bytes = Vec::new();
+    File::open(path).ok()?.take(64 * 1024).read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut out: String = text.lines().take(max_lines).map(|l| format!("{l}\n")).collect();
+    if text.lines().count() > max_lines {
+        out.push_str("[... more lines left out ...]\n");
+    }
+    Some(out)
+}
+
 pub fn tail_lines(path: &Path, max_lines: usize) -> Option<String> {
     let mut file = File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
@@ -916,7 +930,11 @@ const REPORT_FILES: &[(&str, usize, usize)] = &[
     (GAME_STEM, 1, 200),
     (SCRIPT_STEM, 0, 300),
     (SCRIPT_STEM, 1, 150),
+    (PROTON_STEM, 0, 400),
 ];
+/// Lines from the start of Proton's log: its header (Proton version,
+/// options, kernel), which the Steam Deck's sandbox cannot read elsewhere.
+const PROTON_HEAD_LINES: usize = 40;
 
 /// The problem report's text: `system`, then `settings`, then `blocks`
 /// (title, text: the last game start, game files, crash files; hv_crash.rs),
@@ -951,6 +969,12 @@ pub fn build_report(
         Some(dir) => {
             for &(stem, n, lines) in REPORT_FILES {
                 let name = file_name(stem, n);
+                if stem == PROTON_STEM {
+                    if let Some(text) = head_lines(&dir.join(&name), PROTON_HEAD_LINES) {
+                        out.push_str(&format!("\n== {name} (first {PROTON_HEAD_LINES} lines)\n"));
+                        out.push_str(&text);
+                    }
+                }
                 if let Some(text) = tail_lines(&dir.join(&name), lines) {
                     out.push_str(&format!("\n== {name} (last {lines} lines)\n"));
                     out.push_str(&text);
@@ -1130,6 +1154,18 @@ mod tests {
         assert!(text.contains("err:module:import_dll"));
         assert!(!text.contains("hunter2"));
         assert!(text.contains("Token: [redacted]"));
+        assert!(!text.contains("steam-hunsterverse.log"), "no Proton log, no section");
+
+        // A debug launch's Proton log (hv7): its header and its end.
+        assert_eq!(file_name(PROTON_STEM, 0), crate::hv_proton::PROTON_LOG_FILE);
+        let proton: String = std::iter::once("Proton: 1795427215 GE-Proton11-14\n".to_string())
+            .chain((1..=1000).map(|i| format!("line {i}\n")))
+            .collect();
+        fs::write(dir.join(crate::hv_proton::PROTON_LOG_FILE), proton).unwrap();
+        let text = build_report(Some(&dir), now, &system, &settings, &blocks);
+        assert!(text.contains("== steam-hunsterverse.log (first 40 lines)\nProton: 1795427215 GE-Proton11-14\nline 1\n"), "{text}");
+        assert!(text.contains("line 39\n[... more lines left out ...]\n\n== steam-hunsterverse.log (last 400 lines)\n[... earlier lines left out ...]\nline 601\n"));
+        assert!(text.ends_with("line 1000\n"));
 
         for i in 0..5 {
             save_report(&dir, now + Duration::from_secs(i), &text).unwrap();

@@ -41,7 +41,10 @@
 #   proton: Steam Deck. No Wine (MEZEPORTA_WINE_CMD points nowhere) and a
 #           stand-in Proton as the installer's MEZEPORTA_PROTON_CMD: Start runs
 #           it even with the setting reset to "portable" (older launchers did
-#           that); "proton" stays set with Dev Mode off when Settings opens.
+#           that), as "getcompatpath <game folder>" with an empty stdin, then
+#           "runinprefix <meze-deps.exe> --stdin-b64" with the game settings on
+#           stdin (hv7; "run" lost stdin in Proton's steam.exe); "proton"
+#           stays set with Dev Mode off when Settings opens.
 #   cancel: (hv4 fix) choose the pre-release, Cancel the update dialog and
 #           start the game (stand-in Proton) on the stable files; open the
 #           launcher again, Install, Cancel while the last file downloads (the
@@ -56,8 +59,10 @@
 #           Advanced, Save report writes Mezeporta/logs/problem-report-*.txt
 #           with the system, the settings, the last game start, the game
 #           files and the logs (the game start included) and opens the log
-#           folder; the next game start gets WINEDEBUG and game.log says
-#           "debug launch"; at most 5 launcher log files; the password in none.
+#           folder; the next game start gets WINEDEBUG and (hv7: the stand-in
+#           passes the environment on) PROTON_LOG=1, PROTON_LOG_DIR = the log
+#           folder, SteamGameId=hunsterverse, and game.log says "debug launch";
+#           at most 5 launcher log files; the password in none.
 #   update: a tampered download is refused with the file unchanged; the
 #           signed one replaces the binary and the launcher restarts into it
 #           in place (same PID).
@@ -139,9 +144,16 @@ mkdir -p "$WORK/proton" "$STATE/compat"
 { echo '#!/bin/sh'
   echo "log='$STATE/proton-calls.log'"
   cat <<'EOF'
+# hv7: "getcompatpath <folder>" (prefix set-up, stdin must stay empty) then
+# "runinprefix ... --stdin-b64" (the game); END after the game's call only.
 { echo "ARGS $*"; echo "COMPAT ${STEAM_COMPAT_DATA_PATH:-}"; echo "WINEDEBUG ${WINEDEBUG:-}"
-  case " $* " in *" --stdin-b64 "*) echo "STDIN $(cat)" ;; esac
-  echo END; } >> "$log"
+  echo "PROTONLOG ${PROTON_LOG:-}|${PROTON_LOG_DIR:-}|${SteamGameId:-}"
+  case " $* " in
+    *" --stdin-b64 "*) echo "STDIN $(cat)"; echo END ;;
+    *) echo "PREP-STDIN-BYTES $(cat | wc -c)" ;;
+  esac; } >> "$log"
+[ "$1" = getcompatpath ] && echo 'Z:\game'
+exit 0
 EOF
 } > "$WORK/proton/proton"
 chmod +x "$WORK/proton/proton"
