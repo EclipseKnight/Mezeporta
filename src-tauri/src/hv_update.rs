@@ -648,54 +648,318 @@ pub fn cleanup_after_update(exe: &Path) {
     }
 }
 
-/// Starts the updated launcher with the same arguments and ends this process.
-/// Linux: exec in place, so the process keeps its PID (on the Steam Deck the
-/// launcher is the main process of a Flatpak sandbox, which ends with it).
-/// Windows: start the new process, which waits for this one to exit
-/// (WAIT_FOR_PID_ENV) before it takes the single-instance mutex.
-pub fn restart(exe: &Path) -> Result<(), String> {
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let err = std::process::Command::new(exe).args(&args).exec();
-        Err(format!("could not restart the launcher: {err}"))
-    }
-    #[cfg(not(unix))]
-    {
-        std::process::Command::new(exe)
-            .args(&args)
-            .env(WAIT_FOR_PID_ENV, std::process::id().to_string())
-            .spawn()
-            .map_err(|e| format!("could not restart the launcher: {e}"))?;
-        std::process::exit(0);
-    }
+// --- Hunsterverse (1.5.4-hv8): restarting into the new launcher -------------
+//
+// Reports (2026-11-24, Windows): "Update and restart" showed "could not
+// restart the launcher: The request is not supported. (os error 50)", and for
+// others the launcher simply closed. Up to hv7 the Windows restart was one
+// `Command::spawn` that inherited this process's standard handles. Our
+// Windows launcher is a console program that calls FreeConsole in GUI mode
+// (main.rs), and on Windows 8 and later FreeConsole closes the standard
+// handles Windows opened for the console while their old values stay in the
+// process (rprichard/win32-console-docs, "FreeConsole (modern)"). Rust's spawn
+// duplicates whatever those values point at by then and CreateProcess passes
+// them on unchecked (STARTF_USESTDHANDLES); the hv6 game watcher, which
+// spawns with null handles, never had the problem. Now: main.rs clears those
+// handle values after FreeConsole; the restart starts the new launcher with
+// null handles and no console (DETACHED_PROCESS), then ShellExecuteEx "open",
+// then explorer.exe, each logged (one that ends within 1.5 s counts as not
+// started); the single-instance lock is released first
+// (main.rs) so a new launcher never exits as a "duplicate" of an old one that
+// is slow to end; and if nothing starts, the player is told that the update
+// IS installed and to open the launcher again.
+
+/// Set for the new process: "<old version> <reason>" (hv8 on), so its log
+/// says why it started (`restart_note`).
+pub const RESTARTED_FROM_ENV: &str = "MEZEPORTA_RESTARTED_FROM";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RestartReason {
+    /// "Update and restart".
+    Update,
+    /// Windows: the game asked to return to the launcher (hv4).
+    ReturnToLauncher,
 }
 
-/// Windows: when started by `restart`, wait (up to 20 s) for the old process
-/// to exit before the single-instance check.
-#[cfg(windows)]
-pub fn wait_for_previous_process() {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
-    let Some(pid) = std::env::var(WAIT_FOR_PID_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-    else {
-        return;
-    };
-    std::env::remove_var(WAIT_FOR_PID_ENV);
-    if let Ok(handle) = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
-        unsafe {
-            WaitForSingleObject(handle, 20_000);
-            let _ = CloseHandle(handle);
+impl RestartReason {
+    fn word(self) -> &'static str {
+        match self {
+            RestartReason::Update => "update",
+            RestartReason::ReturnToLauncher => "game",
         }
     }
 }
 
-#[cfg(not(windows))]
-pub fn wait_for_previous_process() {
+/// The log line of a launcher that was started by `restart`, from the two
+/// environment values; None for a normal start.
+pub fn restart_note(pid: Option<&str>, from: Option<&str>) -> Option<String> {
+    let pid = pid.map(str::trim).filter(|p| !p.is_empty());
+    let from = from.map(str::trim).filter(|f| !f.is_empty());
+    let by = pid.map(|p| format!(" (previous process {p})")).unwrap_or_default();
+    match from.map(|f| f.split_once(' ').unwrap_or((f, ""))) {
+        Some((version, "update")) => Some(format!("started after an update from {version}{by}")),
+        Some((version, "game")) => Some(format!("started again after the game (launcher {version}){by}")),
+        Some((version, other)) => Some(format!("started by a restart of launcher {version} ({other}){by}")),
+        // A launcher up to hv7 restarted us: it does not say its version.
+        None => pid.map(|_| format!("started by a restart of an older launcher, probably after an update{by}")),
+    }
+}
+
+/// What the player reads when the update is in place but no way of starting
+/// the new launcher worked.
+pub fn restart_failed_message(failures: &[String]) -> String {
+    let last = failures.last().map(String::as_str).unwrap_or("no way to start it");
+    format!(
+        "The update is installed, but the launcher could not reopen itself ({last}). \
+         Close the launcher and open it again to use the new version."
+    )
+}
+
+/// Tries each way of starting the new launcher in turn (each one logged) and
+/// returns the name of the first that worked, or every failure.
+pub fn first_that_starts<'a>(
+    attempts: Vec<(&'a str, Box<dyn FnOnce() -> Result<(), String> + 'a>)>,
+) -> Result<&'a str, Vec<String>> {
+    let mut failures = Vec::new();
+    for (name, attempt) in attempts {
+        match attempt() {
+            Ok(()) => {
+                info!("restart: {name}: started");
+                return Ok(name);
+            }
+            Err(e) => {
+                warn!("restart: {name} failed: {e}");
+                failures.push(format!("{name}: {e}"));
+            }
+        }
+    }
+    Err(failures)
+}
+
+/// A Windows command line for `args` (the rules of CommandLineToArgvW /
+/// the MSVC runtime), for ShellExecuteEx. None when an argument is not text.
+pub fn windows_command_line(args: &[std::ffi::OsString]) -> Option<String> {
+    let mut out = String::new();
+    for arg in args {
+        let arg = arg.to_str()?;
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '"']) {
+            out.push_str(arg);
+            continue;
+        }
+        out.push('"');
+        let mut backslashes = 0;
+        for c in arg.chars() {
+            match c {
+                '\\' => backslashes += 1,
+                '"' => {
+                    out.extend(std::iter::repeat('\\').take(backslashes * 2 + 1));
+                    out.push('"');
+                    backslashes = 0;
+                }
+                _ => {
+                    out.extend(std::iter::repeat('\\').take(backslashes));
+                    out.push(c);
+                    backslashes = 0;
+                }
+            }
+        }
+        out.extend(std::iter::repeat('\\').take(backslashes * 2));
+        out.push('"');
+    }
+    Some(out)
+}
+
+/// Starts the updated launcher with the same arguments and ends this process.
+/// Linux: exec in place, so the process keeps its PID (on the Steam Deck the
+/// launcher is the main process of a Flatpak sandbox, which ends with it).
+/// Windows: start the new process (several ways, above), which waits for this
+/// one to exit (WAIT_FOR_PID_ENV). The caller releases the single-instance
+/// lock first (main.rs `restart_launcher`). Returns only when it failed.
+pub fn restart(exe: &Path, reason: RestartReason) -> Result<(), String> {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let from = format!("{CURRENT_VERSION} {}", reason.word());
+    let fail = |failures: Vec<String>| match reason {
+        RestartReason::Update => restart_failed_message(&failures),
+        RestartReason::ReturnToLauncher => format!("could not restart the launcher: {}", failures.join("; ")),
+    };
+    info!("restart ({}): {} with {} argument(s)", reason.word(), exe.display(), args.len());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(exe)
+            .args(&args)
+            .env(RESTARTED_FROM_ENV, &from)
+            .env_remove(WAIT_FOR_PID_ENV)
+            .exec();
+        Err(fail(vec![format!("exec: {err}")]))
+    }
+    #[cfg(windows)]
+    {
+        // In this process's environment too: ShellExecuteEx passes it on.
+        std::env::set_var(WAIT_FOR_PID_ENV, std::process::id().to_string());
+        std::env::set_var(RESTARTED_FROM_ENV, &from);
+        let attempts: Vec<(&str, Box<dyn FnOnce() -> Result<(), String> + '_>)> = vec![
+            ("CreateProcess", Box::new(|| spawn_detached(exe, &args))),
+            ("ShellExecuteEx", Box::new(|| shell_open(exe, &args))),
+            // Last: explorer starts it without our environment (no wait for
+            // this process; the lock is already released).
+            ("explorer.exe", Box::new(|| explorer_open(exe))),
+        ];
+        match first_that_starts(attempts) {
+            Ok(_) => std::process::exit(0),
+            Err(failures) => {
+                std::env::remove_var(WAIT_FOR_PID_ENV);
+                std::env::remove_var(RESTARTED_FROM_ENV);
+                Err(fail(failures))
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_detached(exe: &Path, args: &[std::ffi::OsString]) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    // No console for the new launcher (it would only free it again) and no
+    // standard handles of ours.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    let mut child = std::process::Command::new(exe)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(DETACHED_PROCESS)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    info!("restart: new launcher pid {}", child.id());
+    // The new launcher waits for this one (WAIT_FOR_PID_ENV), so one that has
+    // ended within moments did not start (e.g. 0xC0000142): try the next way.
+    let deadline = std::time::Instant::now() + STARTED_CHECK;
+    while std::time::Instant::now() < deadline {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!("the new launcher ended at once ({status})"));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
+/// How long the restart watches a started launcher for an early end.
+#[cfg(windows)]
+const STARTED_CHECK: Duration = Duration::from_millis(1500);
+
+#[cfg(windows)]
+fn shell_open(exe: &Path, args: &[std::ffi::OsString]) -> Result<(), String> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+    use windows::Win32::UI::Shell::{
+        ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let parameters = windows_command_line(args).ok_or("an argument is not text")?;
+    let verb = HSTRING::from("open");
+    let file = HSTRING::from(exe);
+    let parameters = HSTRING::from(parameters);
+    let directory = std::env::current_dir().map(|d| HSTRING::from(d.as_path())).unwrap_or_default();
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(parameters.as_ptr()),
+        lpDirectory: if directory.is_empty() { PCWSTR::null() } else { PCWSTR(directory.as_ptr()) },
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    unsafe { ShellExecuteExW(&mut info) }.map_err(|e| e.to_string())?;
+    // Copied out: the struct is packed on 32-bit Windows.
+    let process = info.hProcess;
+    if process.is_invalid() {
+        return Ok(());
+    }
+    let mut result = Ok(());
+    if unsafe { WaitForSingleObject(process, STARTED_CHECK.as_millis() as u32) } == WAIT_OBJECT_0 {
+        let mut code = 0u32;
+        let _ = unsafe { GetExitCodeProcess(process, &mut code) };
+        result = Err(format!("the new launcher ended at once (exit code {code:#x})"));
+    }
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn explorer_open(exe: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let windir = std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("windir"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("C:\\Windows"));
+    // raw_arg: explorer wants the path in quotes as one argument.
+    let quoted = format!("\"{}\"", exe.display());
+    std::process::Command::new(windir.join("explorer.exe"))
+        .raw_arg(quoted)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// What the new process learnt about how it was started.
+#[derive(Debug, Default)]
+pub struct StartedAfterRestart {
+    /// The note for the log (`restart_note`); None for a normal start.
+    pub note: Option<String>,
+    /// Windows: the previous launcher had not ended after the wait.
+    pub previous_still_running: bool,
+}
+
+/// After a restart: logs why this launcher started and (Windows) waits up to
+/// 20 s for the old process to exit before the single-instance check.
+pub fn wait_for_previous_process() -> StartedAfterRestart {
+    let pid_text = std::env::var(WAIT_FOR_PID_ENV).ok();
+    let from = std::env::var(RESTARTED_FROM_ENV).ok();
     std::env::remove_var(WAIT_FOR_PID_ENV);
+    std::env::remove_var(RESTARTED_FROM_ENV);
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut started = StartedAfterRestart {
+        note: restart_note(pid_text.as_deref(), from.as_deref()),
+        previous_still_running: false,
+    };
+    if let Some(note) = &started.note {
+        info!("{note}");
+    }
+    #[cfg(windows)]
+    if let Some(pid) = pid_text.and_then(|v| v.trim().parse::<u32>().ok()) {
+        use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+        match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
+            Ok(handle) => {
+                let waited = unsafe { WaitForSingleObject(handle, 20_000) };
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
+                if waited == WAIT_OBJECT_0 {
+                    info!("previous launcher (pid {pid}) has ended");
+                } else {
+                    started.previous_still_running = true;
+                    warn!("previous launcher (pid {pid}) still running after 20 s; starting anyway");
+                }
+            }
+            Err(_) => info!("previous launcher (pid {pid}) had already ended"),
+        }
+    }
+    started
 }
 
 #[cfg(test)]
@@ -965,6 +1229,83 @@ mod tests {
         assert!(e.needs_admin && e.denied_or_in_use);
         let e = SwapError::from_io("x", Path::new("a"), io::Error::from(io::ErrorKind::NotFound));
         assert!(!e.needs_admin && !e.denied_or_in_use);
+    }
+
+    // --- hv8: restarting into the new launcher --------------------------
+
+    #[test]
+    fn restart_note_says_why_the_launcher_started() {
+        assert_eq!(restart_note(None, None), None, "a normal start");
+        assert_eq!(
+            restart_note(Some("4242"), Some("1.5.4-hv8 update")).as_deref(),
+            Some("started after an update from 1.5.4-hv8 (previous process 4242)")
+        );
+        assert_eq!(
+            restart_note(None, Some("1.5.4-hv8 update")).as_deref(),
+            Some("started after an update from 1.5.4-hv8"),
+            "Linux exec: same process, no pid"
+        );
+        assert_eq!(
+            restart_note(Some("7"), Some("1.5.4-hv8 game")).as_deref(),
+            Some("started again after the game (launcher 1.5.4-hv8) (previous process 7)")
+        );
+        // hv4..hv7 set only the pid.
+        assert_eq!(
+            restart_note(Some("7"), None).as_deref(),
+            Some("started by a restart of an older launcher, probably after an update (previous process 7)")
+        );
+        assert_eq!(restart_note(Some(" "), Some("")), None);
+    }
+
+    #[test]
+    fn restart_tries_each_way_until_one_starts() {
+        let mut tried = Vec::new();
+        let tried_ref = std::cell::RefCell::new(&mut tried);
+        let attempts: Vec<(&str, Box<dyn FnOnce() -> Result<(), String> + '_>)> = vec![
+            ("CreateProcess", Box::new(|| {
+                tried_ref.borrow_mut().push("CreateProcess");
+                Err("The request is not supported. (os error 50)".into())
+            })),
+            ("ShellExecuteEx", Box::new(|| {
+                tried_ref.borrow_mut().push("ShellExecuteEx");
+                Ok(())
+            })),
+            ("explorer.exe", Box::new(|| panic!("not needed once one worked"))),
+        ];
+        assert_eq!(first_that_starts(attempts), Ok("ShellExecuteEx"));
+        assert_eq!(tried, ["CreateProcess", "ShellExecuteEx"]);
+
+        let attempts: Vec<(&str, Box<dyn FnOnce() -> Result<(), String>>)> = vec![
+            ("CreateProcess", Box::new(|| Err("os error 50".into()))),
+            ("explorer.exe", Box::new(|| Err("not found".into()))),
+        ];
+        let failures = first_that_starts(attempts).unwrap_err();
+        assert_eq!(failures, ["CreateProcess: os error 50", "explorer.exe: not found"]);
+        let msg = restart_failed_message(&failures);
+        assert!(msg.starts_with("The update is installed"), "{msg}");
+        assert!(msg.contains("explorer.exe: not found") && msg.contains("open it again"), "{msg}");
+        assert!(!msg.contains("could not restart the launcher:"), "not the old error wording: {msg}");
+    }
+
+    #[test]
+    fn windows_command_line_quotes_like_the_msvc_runtime() {
+        let os = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert_eq!(windows_command_line(&[]).as_deref(), Some(""));
+        assert_eq!(windows_command_line(&os(&["--flag", "x"])).as_deref(), Some("--flag x"));
+        assert_eq!(
+            windows_command_line(&os(&["C:\\Games\\My MHF\\", "a\"b", ""])).as_deref(),
+            Some("\"C:\\Games\\My MHF\\\\\" \"a\\\"b\" \"\"")
+        );
+        assert_eq!(windows_command_line(&os(&["C:\\x\\y"])).as_deref(), Some("C:\\x\\y"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_exec_failure_says_the_update_is_installed() {
+        let err = restart(Path::new("/nonexistent/mezeporta-bin"), RestartReason::Update).unwrap_err();
+        assert!(err.starts_with("The update is installed") && err.contains("exec:"), "{err}");
+        let err = restart(Path::new("/nonexistent/mezeporta-bin"), RestartReason::ReturnToLauncher).unwrap_err();
+        assert!(err.starts_with("could not restart the launcher: exec:"), "{err}");
     }
 
     #[test]

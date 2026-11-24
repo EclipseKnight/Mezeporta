@@ -3,8 +3,33 @@
 fn detach_console_for_gui() {
     // When launched from cmd, a console-subsystem process inherits cmd's console.
     // In GUI mode (no CLI args), detach the console.
-    use windows::Win32::System::Console::FreeConsole;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{
+        FreeConsole, GetConsoleMode, GetStdHandle, SetStdHandle, CONSOLE_MODE, STD_ERROR_HANDLE,
+        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    // Hunsterverse (1.5.4-hv8): FreeConsole closes the standard handles Windows
+    // opened for the console (started from Explorer) but leaves their values
+    // in place; a later spawn that inherits them (the self-update restart up
+    // to hv7) passed on whatever those values meant by then ("The request is
+    // not supported", os error 50; hv_update.rs), and stdout writes went to
+    // them. Clear the console ones; files or pipes (redirected output) stay.
+    let ids = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE];
+    let is_console = ids.map(|id| unsafe {
+        match GetStdHandle(id) {
+            Ok(h) if !h.is_invalid() => {
+                let mut mode = CONSOLE_MODE(0);
+                GetConsoleMode(h, &mut mode).is_ok()
+            }
+            _ => false,
+        }
+    });
     let _ = unsafe { FreeConsole() };
+    for (id, console) in ids.into_iter().zip(is_console) {
+        if console {
+            let _ = unsafe { SetStdHandle(id, HANDLE(0)) };
+        }
+    }
 }
 
 mod altclient_stats;
@@ -939,8 +964,25 @@ fn single_instance_mutex_name() -> String {
     )
 }
 
+/// Hunsterverse (1.5.4-hv8): the single-instance mutex handle, so a restart
+/// can release it before it starts the new launcher.
 #[cfg(windows)]
-fn acquire_single_instance_mutex() -> Option<HANDLE> {
+static SINGLE_INSTANCE_MUTEX: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(windows)]
+fn create_single_instance_mutex(mutex_name_ptr: PCWSTR) {
+    match unsafe { CreateMutexW(None, false, mutex_name_ptr) } {
+        Ok(handle) => SINGLE_INSTANCE_MUTEX.store(handle.0, Ordering::SeqCst),
+        Err(err) => warn!("failed to create single-instance mutex: {}", err),
+    }
+}
+
+/// `after_restart`: this launcher was started by `hv_update::restart` and the
+/// previous one had not ended after the wait (a launcher up to hv7 keeps the
+/// mutex until it is gone): start anyway rather than exit as a duplicate
+/// (hv8; the launcher "just closed" after an update).
+#[cfg(windows)]
+fn acquire_single_instance_mutex(after_restart: bool) {
     let mutex_name = single_instance_mutex_name();
     let mutex_name_wide: Vec<u16> = mutex_name
         .encode_utf16()
@@ -950,23 +992,43 @@ fn acquire_single_instance_mutex() -> Option<HANDLE> {
 
     if let Ok(handle) = unsafe { OpenMutexW(MUTEX_ALL_ACCESS, false, mutex_name_ptr) } {
         let _ = unsafe { CloseHandle(handle) };
-        info!(
-            "launcher instance already running for this executable path, exiting duplicate process"
-        );
-        std::process::exit(0);
-    }
-
-    match unsafe { CreateMutexW(None, false, mutex_name_ptr) } {
-        Ok(handle) => Some(handle),
-        Err(err) => {
-            warn!("failed to create single-instance mutex: {}", err);
-            None
+        if !after_restart {
+            info!(
+                "launcher instance already running for this executable path, exiting duplicate process"
+            );
+            std::process::exit(0);
         }
+        warn!("the previous launcher still holds the single-instance lock after the restart; starting anyway");
     }
+    create_single_instance_mutex(mutex_name_ptr);
 }
 
 #[cfg(not(windows))]
-fn acquire_single_instance_mutex() {}
+fn acquire_single_instance_mutex(_after_restart: bool) {}
+
+/// Hunsterverse (1.5.4-hv8): restarts the launcher (hv_update::restart). On
+/// Windows the single-instance lock is released first, so the new launcher
+/// never exits as a duplicate of this one while it ends; taken again when
+/// the restart failed.
+fn restart_launcher(exe: &std::path::Path, reason: hv_update::RestartReason) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let handle = SINGLE_INSTANCE_MUTEX.swap(0, Ordering::SeqCst);
+        if handle != 0 {
+            let _ = unsafe { CloseHandle(HANDLE(handle)) };
+        }
+    }
+    let result = hv_update::restart(exe, reason);
+    #[cfg(windows)]
+    {
+        let mutex_name_wide: Vec<u16> = single_instance_mutex_name()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        create_single_instance_mutex(PCWSTR(mutex_name_wide.as_ptr()));
+    }
+    result
+}
 
 #[cfg(windows)]
 fn set_ps4_aspect_lock_enabled(enabled: bool, numerator: i32, denominator: i32) {
@@ -5574,12 +5636,15 @@ async fn hv_check_launcher_update(
 }
 
 /// Downloads, checks and installs the update, then restarts into it. Returns
-/// only on failure (the launcher keeps running the old version).
+/// only when it did not restart: Err when the update failed (the launcher
+/// keeps running the old version), Ok(message) when the update is installed
+/// but the new launcher could not be started (hv8: not shown as an error;
+/// the player opens the launcher again).
 #[tauri::command]
 async fn hv_install_launcher_update(
     window: tauri::Window,
     state: tauri::State<'_, TauriState>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let exe = launcher_exe().ok_or("Cannot find the launcher's own file.")?;
     let manifest = match state.state_sync.lock().await.hv_update_manifest.clone() {
         Some(m) => m,
@@ -5606,11 +5671,13 @@ async fn hv_install_launcher_update(
         cancel_all_requests(&mut state_sync);
     }
     info!("launcher update: restarting into {}", manifest.version);
-    let result = hv_update::restart(exe);
-    if let Err(e) = &result {
-        warn!("{e}");
+    match restart_launcher(exe, hv_update::RestartReason::Update) {
+        Ok(()) => Ok(String::new()),
+        Err(e) => {
+            warn!("{e}");
+            Ok(e)
+        }
     }
-    result
 }
 
 // --- Hunsterverse (1.5.4-hv6): log files and the problem report (hv_log.rs) ---
@@ -6036,7 +6103,7 @@ fn main() {
 
     // Hunsterverse (1.5.4-hv2): after a self-update, let the old process exit
     // first (Windows), then remove the old binary it left (hv_update.rs).
-    hv_update::wait_for_previous_process();
+    let restarted = hv_update::wait_for_previous_process();
     info!(
         "Mezeporta {} starting (pid {})",
         env!("CARGO_PKG_VERSION"),
@@ -6046,7 +6113,7 @@ fn main() {
         hv_update::cleanup_after_update(exe);
     }
 
-    let _single_instance_guard = acquire_single_instance_mutex();
+    acquire_single_instance_mutex(restarted.previous_still_running);
     // Hunsterverse (1.5.4-hv6): the log file, after the single-instance check
     // (a second launcher must not move the running one's file aside).
     match hv_log::attach_file(&default_effective_folder()) {
@@ -6474,7 +6541,9 @@ fn main() {
                         // as before.
                         if cfg!(windows) {
                             if let Some(exe) = launcher_exe() {
-                                if let Err(e) = hv_update::restart(exe) {
+                                if let Err(e) =
+                                    restart_launcher(exe, hv_update::RestartReason::ReturnToLauncher)
+                                {
                                     warn!("{e}; reopening the launcher in this process");
                                 }
                             }

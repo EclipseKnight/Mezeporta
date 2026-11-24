@@ -53,6 +53,11 @@ This is the Mezeporta launcher v1.5.4 by LilButter
 - 1.5.4-hv7: Steam Deck: the game no longer closes right after Start
   (exit code 5). Proton did not hand the launcher's start data on to the
   game; the launcher now starts the game through Proton in a way that does.
+- 1.5.4-hv8: "Update and restart" on Windows reopens the launcher reliably
+  (some PCs showed "could not restart the launcher: The request is not
+  supported" or the launcher just closed). If it still cannot reopen itself,
+  it says the update is installed: open the launcher again. The log says
+  when the launcher started after an update.
 
 Source code: Mezeporta-v{version}-source.zip on the same release page
 (https://github.com/EclipseKnight/Mezeporta/releases), and the git history of

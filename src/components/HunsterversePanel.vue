@@ -34,6 +34,8 @@ const update = ref(null); // UpdateInfo when one is available
 const updateHidden = ref(false);
 const updateBusy = ref(false);
 const updateError = ref("");
+// hv8: the update is installed but the launcher could not reopen itself.
+const updateInstalled = ref("");
 
 async function checkUpdate() {
   try {
@@ -48,8 +50,11 @@ async function installUpdate() {
   updateBusy.value = true;
   updateError.value = "";
   try {
-    // Only returns on failure: on success the launcher restarts into the new version.
-    await invoke("hv_install_launcher_update");
+    // Returns only when the launcher did not restart: an error when the update
+    // failed, a message when it is installed but the new launcher did not start
+    // (hv8: the player opens the launcher again; not an error).
+    const note = await invoke("hv_install_launcher_update");
+    if (note) updateInstalled.value = String(note);
   } catch (e) {
     updateError.value = String(e || "The update failed.");
   } finally {
@@ -288,9 +293,10 @@ function isChosen(channel) {
           <li v-for="(n, i) in updateNotes" :key="i">{{ n }}</li>
         </ul>
         <div v-if="updateError" class="hv-error">{{ updateError }}</div>
+        <div v-if="updateInstalled" class="hv-ok hv-update-installed">{{ updateInstalled }}</div>
       </div>
       <div class="hv-actions">
-        <button class="hv-btn hv-primary" :disabled="updateBusy" @click="installUpdate">
+        <button v-if="!updateInstalled" class="hv-btn hv-primary" :disabled="updateBusy" @click="installUpdate">
           {{ updateBusy ? "Downloading..." : "Update and restart" }}
         </button>
         <button class="hv-btn" :disabled="updateBusy" @click="updateHidden = true">Later</button>
@@ -556,6 +562,10 @@ function isChosen(channel) {
 .hv-warn {
   color: #f0c36a;
   margin-left: 6px;
+}
+.hv-update-installed {
+  display: block;
+  margin: 6px 0;
 }
 .hv-error {
   color: #ff9a8a;

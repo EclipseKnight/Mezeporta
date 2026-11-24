@@ -1,0 +1,4 @@
+If this update shows "could not restart the launcher" or the launcher just closes: the update is installed. Open the launcher again.
+Windows: "Update and restart" now reopens the launcher reliably (some PCs showed "The request is not supported" or the launcher just closed). If it still cannot reopen itself, it says the update is installed and asks you to open it again.
+Steam Deck (as in hv7): the game no longer closes right after you press Start (exit code 5).
+The log now says when the launcher started after an update, and how the restart went, for the problem report.

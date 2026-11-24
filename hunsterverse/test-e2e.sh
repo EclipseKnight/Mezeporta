@@ -65,7 +65,8 @@
 #           at most 5 launcher log files; the password in none.
 #   update: a tampered download is refused with the file unchanged; the
 #           signed one replaces the binary and the launcher restarts into it
-#           in place (same PID).
+#           in place (same PID); with NEW_VERSION hv8 or later, the new
+#           mezeporta.log says "started after an update from NEW_VERSION".
 #   layout: the Patch button is part of the launcher layout and covers
 #           nothing, at the default window size and a small one.
 set -euo pipefail
@@ -231,5 +232,12 @@ python3 -I "$HERE/make_latest_json.py" "$NEXT_VERSION" "$WORK/notes.txt" "http:/
 python3 -I "$HERE/e2e/drive.py" update "$GAME" "$STATE" || { tail -n 40 "$WORK/driver.out" >&2; exit 1; }
 [[ $(grep -c "^$RP GET /latest.json 200" "$STATE/requests.log") -ge 2 ]] || { echo "FAIL the restarted launcher did not check for updates again" >&2; exit 1; }
 echo "ok   the restarted launcher checked latest.json again"
+# hv8: the new launcher's log says it started after an update, and from which
+# version (only when NEW_BIN is hv8 or later: older ones do not pass it on).
+if [[ "${NEW_VERSION:-}" =~ -hv([0-9]+)$ ]] && (( BASH_REMATCH[1] >= 8 )); then
+  grep -q "started after an update from $NEW_VERSION" "$GAME/Mezeporta/logs/mezeporta.log" \
+    || { echo "FAIL mezeporta.log does not say \"started after an update from $NEW_VERSION\"" >&2; tail -n 20 "$GAME/Mezeporta/logs/mezeporta.log" >&2; exit 1; }
+  echo "ok   mezeporta.log: started after an update from $NEW_VERSION"
+fi
 fi
 echo "all e2e checks passed"

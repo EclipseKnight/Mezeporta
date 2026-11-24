@@ -15,6 +15,7 @@ this folder (including the Linux zip's `run-mezeporta.sh`, since hv6),
 | 1.5.4-hv5 (2026-11-23) | A self-update that needs administrator rights (launcher in Program Files, or files an administrator created) asks for them with the UAC prompt on Windows instead of failing with "access is denied"; clear messages when the prompt is declined, when it is still denied, on Linux, and when patching a protected game folder (below) |
 | 1.5.4-hv6 (2026-11-24) | Includes hv5. Log files on disk (`Mezeporta/logs`, the current run and the 4 before), what the game start, login, patch and self-update do, the game's own output and exit code on Linux / Steam Deck, and a "Problem report" (Settings, Advanced: Save report, Copy report) for Discord; our own `run-mezeporta.sh` that logs too. `tauri-plugin-log` replaced by `hv_log.rs` ("Logs and problem reports", below). A game that closes within 60 s, crashes or does not start ("instant crash on launch"): its exit code in words (Windows NTSTATUS, Linux signals and Wine's codes; Windows too now, through a small watcher process), Wine's error lines, a message at the next launcher start offering "Save report", an optional debug launch on Linux (`WINEDEBUG=+seh,+loaddll`), and in the report the game files' sha256, hvmods' crash files and Windows Error Reporting entries (`hv_crash.rs`, below) |
 | 1.5.4-hv7 (built 2026-11-24, not published) | Steam Deck: the game ended right after Start with exit code 5. `proton run` starts the game through Proton's `steam.exe`, which does not pass the launcher's stdin (the start data) on, so `meze-deps.exe` read nothing. Proton now runs `getcompatpath` (prefix set-up) then `runinprefix meze-deps.exe --stdin-b64`; plain Wine unchanged. A debug launch on Proton also gets Proton's own log where the Proton command passes the variables on (the installer's `proton-host.sh` does not yet). "The game's start data (hv7)" under "Proton on the Steam Deck", below |
+| 1.5.4-hv8 (built 2026-11-24, Windows and Linux) | Includes hv7. The restart after "Update and restart" on Windows: "could not restart the launcher: The request is not supported. (os error 50)" and launchers that just closed. Up to hv7 the restart's spawn passed on the stale standard handles `FreeConsole` leaves behind; now those are cleared at start, the restart tries CreateProcess (no handles, no console), then ShellExecuteEx, then `explorer.exe`, watching each for an early end; the single-instance lock is released first; if nothing starts, a notice (not an error) says the update is installed and to open the launcher again. A new launcher whose predecessor (up to hv7) is still running after 20 s starts anyway instead of exiting as a "duplicate". The log says "started after an update from <version>" (Windows and Linux) and each restart attempt. "Restart after an update (hv8)", below |
 
 ## Client patch choice (hv2)
 
@@ -170,7 +171,8 @@ How it works:
 5. Restart: Linux `exec`s the new binary in the same process (same PID: on
    the Steam Deck the launcher is the main process of its Flatpak sandbox,
    which would end with it); Windows starts the new exe and exits, and the new
-   one waits for the old PID before its single-instance check. The new
+   one waits for the old PID before its single-instance check (hv8: several
+   ways to start it, "Restart after an update (hv8)" below). The new
    launcher deletes `.old` at start.
 
 Only the launcher binary changes. The other files of the release zips
@@ -179,6 +181,66 @@ changes them must say "run the installer again" in its notes.
 
 Override for tests or staging: `MEZEPORTA_UPDATE_URL=<url of a latest.json>`
 (the signature check still applies).
+
+### Restart after an update (hv8)
+
+Reports (2026-11-24, Windows): a player on hv4 pressed "Update and restart"
+for hv6 and got, in red, `could not restart the launcher: The request is not
+supported. (os error 50)` (the update itself was installed); others saw the
+launcher simply close.
+
+Cause (from the code; not reproduced, there is no Windows machine here and
+Wine's console works differently): our Windows launcher is a console
+program (no `windows_subsystem`) that calls `FreeConsole` in GUI mode. On
+Windows 8 and later `FreeConsole` closes the standard handles Windows opened
+for the console (a start from Explorer) but leaves their values in the
+process (github.com/rprichard/win32-console-docs, "FreeConsole (modern)").
+The restart was a plain `Command::spawn`, which inherits stdin/stdout/stderr:
+Rust duplicates whatever object those values point at by then (or nothing)
+and CreateProcess passes them on unchecked (`STARTF_USESTDHANDLES`). Which
+object that is depends on the machine and the moment, so one PC fails with
+error 50, another starts a launcher with odd handles. The hv6 game watcher,
+which spawns with null handles, has no such problem. hv4's "back to the
+launcher" restart used the same spawn.
+
+Now:
+
+- At start (GUI mode) the launcher clears the standard handles that were
+  console handles after `FreeConsole` (files and pipes of a redirected start
+  stay), so no spawn and no log line to stdout uses a stale value.
+- `restart` (Windows, `hv_update.rs`) releases the single-instance mutex
+  (`main.rs` `restart_launcher`), then tries, each logged: CreateProcess with
+  null handles and `DETACHED_PROCESS` (no console window); `ShellExecuteExW`
+  "open"; `explorer.exe "<exe>"` (Explorer starts it without our environment,
+  so that launcher does not wait for the old PID; the mutex is already free).
+  A started launcher that ends within 1.5 s counts as failed (it would be
+  waiting for the old process), and the next way is tried.
+- Nothing started: the update bar says, without the error colour, "The update
+  is installed, but the launcher could not reopen itself (...). Close the
+  launcher and open it again", and hides "Update and restart". The mutex is
+  taken again. Same message when the Linux `exec` fails.
+- The new launcher logs why it started (`MEZEPORTA_RESTARTED_FROM`, set by
+  hv8 and later): "started after an update from 1.5.4-hv8 (previous process
+  N)", "started again after the game", or for a restart by hv4-hv7 "started by
+  a restart of an older launcher". Then (Windows) the wait: "has ended", "had
+  already ended" or "still running after 20 s; starting anyway". In that
+  last case it no longer exits as a duplicate when the old one still holds
+  the mutex (launchers up to hv7 keep it until they are gone; such an exit
+  left nothing in the log, as it happened before the log file opened).
+
+Checked for "it just closes": the Windows wait (20 s) then the mutex: fixed
+as above. The `.old` cleanup only logs a failure. A WebView2 start failure
+(e.g. the old launcher's WebView2 still holding the data folder) ends the
+launcher too; its log then shows `failed to receive message from webview`
+or `error while building tauri application` just before `app exit`. Linux:
+the `exec` uses the path read at start (before the rename, so not
+`/proc/self/exe`'s "(deleted)" name) and the same arguments, in the same
+Flatpak sandbox; no problem found there.
+
+Players updating from hv4-hv7 still run the old restart once (the old
+launcher restarts into the new one), so the error or the closing can happen
+one last time; hv8's notes (shown in the old launcher's update bar) say the
+update is installed and to open the launcher again.
 
 ### Updates that need administrator rights (hv5)
 
@@ -693,6 +755,17 @@ launcher updates; launchers already updated stay on it until a newer release.
   data in both set-ups, then stops at the next steps of a test folder with
   no game: `unable to find path to game` (no `mhf.ini`), with an empty
   `mhf.ini` `unable to load or free mhfo dll` (a stand-in DLL).
+- hv8, in the same `hv` tests (`hv_update`): why the new launcher started
+  (update from hv8, back from the game, an older launcher, a normal start),
+  the restart trying each way until one starts and its failure message ("the
+  update is installed", not the old error), Windows command-line quoting for
+  ShellExecuteEx, and the Linux `exec` failure message. `test-e2e.sh`
+  scenario `update` with `NEW_VERSION` hv8 or later: the restarted launcher's
+  `mezeporta.log` says "started after an update from NEW_VERSION". Under
+  Wine 9 (by hand): the Windows exe started with the restart variables logs
+  the note and "has ended" / "had already ended" / "still running after 20
+  s; starting anyway" (a Windows process of 9 s, a missing PID, one of 40 s).
+  The Windows restart itself needs WebView2, which Wine lacks: not run here.
 - `bash hunsterverse/tests/run-mezeporta.test.sh`: `run-mezeporta.sh` with a
   stand-in launcher: not a terminal (output and errors in the log, exit code
   kept), rotation, a terminal (`script`), no writable log folder.
